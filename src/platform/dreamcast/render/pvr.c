@@ -1301,13 +1301,18 @@ static pvr_ptr_t M_LoadVQ(const uint32_t hash, bool *const mip)
     if (m_VQ.fp == nullptr) {
         return nullptr;
     }
-    const int32_t pos = M_FindIndexed(m_VQ.index, m_VQ.count, hash);
-    if (pos < 0) {
+    int32_t pos = M_FindIndexed(m_VQ.index, m_VQ.count, hash);
+    if (pos == -1) {
         return nullptr;
     }
+    // Bit 31: a page with see-through texels, whose mipmaps stay on the disc
+    // (texvq.c): video memory takes its codebook and its own indices alone.
+    const bool use_mip = m_VQ.mip && (pos & 0x80000000) == 0
+        && g_Config.rendering.dc_mipmaps;
+    pos &= 0x7FFFFFFF;
     const size_t bytes = m_VQ.mip ? M_VQ_MIP_BYTES : M_VQ_BYTES;
     const long at = 8 + m_VQ.count * 8 + (long)pos * bytes;
-    pvr_ptr_t ptr = pvr_mem_malloc(bytes);
+    pvr_ptr_t ptr = pvr_mem_malloc(use_mip ? bytes : M_VQ_BYTES);
     if (ptr != nullptr
         && ((at != m_VQ.at && fseek(m_VQ.fp, at, SEEK_SET) != 0)
             || fread(m_VQ.data, 1, bytes, m_VQ.fp) != bytes)) {
@@ -1315,10 +1320,18 @@ static pvr_ptr_t M_LoadVQ(const uint32_t hash, bool *const mip)
         ptr = nullptr;
     }
     m_VQ.at = ptr != nullptr ? at + (long)bytes : -1;
-    if (ptr != nullptr) {
-        M_WriteTexels(ptr, (const uint16_t *)m_VQ.data, bytes / 2);
+    if (ptr != nullptr && m_VQ.mip && !use_mip) {
+        memmove(
+            m_VQ.data + M_VQ_BOOK_BYTES,
+            m_VQ.data + M_VQ_BOOK_BYTES + M_VQ_MIP_INDICES,
+            M_VQ_BYTES - M_VQ_BOOK_BYTES);
     }
-    *mip = m_VQ.mip;
+    if (ptr != nullptr) {
+        M_WriteTexels(
+            ptr, (const uint16_t *)m_VQ.data,
+            (use_mip ? bytes : M_VQ_BYTES) / 2);
+    }
+    *mip = use_mip;
     return ptr;
 }
 
@@ -1530,7 +1543,7 @@ void DC_PVR_CommitTexturePages(void)
     char formats_text[M_MAX_TEXTURE_PAGES + 1] = {};
     for (int32_t i = 0; i < m_Pages.count; i++) {
         formats_text[i] = m_Pages.vq[i]
-            ? 'v'
+            ? (m_Pages.mip[i] ? 'm' : 'v')
             : (m_Pages.format[i] == TEXTURE_PAGE_ARGB4444 ? '4' : '1');
     }
     LOG_INFO(
@@ -1885,6 +1898,20 @@ float DC_PVR_Depth2D(float v)
     return M_UseDepth(base + v);
 }
 
+static bool m_Trilinear = false;
+
+bool DC_PVR_HasMipmaps(const int32_t page)
+{
+    return page >= 0 && page < m_Pages.count && m_Pages.mip[page]
+        && m_Pages.vq[page];
+}
+
+void DC_PVR_SetTrilinear(const bool on)
+{
+    m_StateDirty |= m_Trilinear != on;
+    m_Trilinear = on;
+}
+
 void DC_PVR_SetFilter(const bool bilinear)
 {
     m_StateDirty |= m_Bilinear != bilinear;
@@ -1907,9 +1934,12 @@ static const uint16_t *M_PageBlock(const int32_t page, const int32_t i)
     if (!m_Pages.vq[page]) {
         return &texels[i * 4];
     }
-    // The block's byte, read with the word it is in.
+    // The block's byte, read with the word it is in: past the codebook, and
+    // past the smaller levels on a page with mipmaps.
     const volatile uint32_t *const words =
-        (const volatile uint32_t *)((const uint8_t *)texels + M_VQ_BOOK_BYTES);
+        (const volatile uint32_t *)((const uint8_t *)texels + M_VQ_BOOK_BYTES
+                                    + (m_Pages.mip[page] ? M_VQ_MIP_INDICES
+                                                         : 0));
     return &texels[((words[i >> 2] >> ((i & 3) * 8)) & 0xFF) * 4];
 }
 
@@ -2253,6 +2283,8 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
 {
     const pvr_list_t list = m_Current->list;
     pvr_poly_cxt_t cxt;
+    // A trilinear second pass on a page without levels (it draws nothing).
+    bool tri_off = false;
     const bool is_bump =
         m_Blend == DC_BLEND_BUMP || m_Blend == DC_BLEND_BUMP_GLOW;
     const pvr_ptr_t bump = is_bump && m_Page >= 0
@@ -2321,6 +2353,12 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
     } else if (m_Page != DC_PVR_NO_TEXTURE) {
         // The same coordinates sample the half page as the whole.
         const pvr_ptr_t half = M_CurrentHalfPage();
+        // Trilinear: the first pass on the opaque faces, the second blended
+        // over them, on a page with its levels.
+        const bool tri = m_Trilinear && m_Pages.mip[m_Page]
+            && m_Pages.vq[m_Page] && half == nullptr
+            && (m_Blend == DC_BLEND_OPAQUE || m_Blend == DC_BLEND_TRILINEAR);
+        tri_off = m_Blend == DC_BLEND_TRILINEAR && !tri;
         const int32_t format =
             (m_Pages.format[m_Page] == TEXTURE_PAGE_ARGB4444
                  ? PVR_TXRFMT_ARGB4444
@@ -2333,15 +2371,18 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
             half != nullptr ? TEXTURE_PAGE_WIDTH / 2 : TEXTURE_PAGE_WIDTH,
             half != nullptr ? TEXTURE_PAGE_HEIGHT / 2 : TEXTURE_PAGE_HEIGHT,
             half != nullptr ? half : m_Pages.ptr[m_Page],
-            m_Bilinear && !(m_Blend == DC_BLEND_PUNCH && m_PtVariant == 4)
+            tri ? (m_Blend == DC_BLEND_TRILINEAR ? PVR_FILTER_TRILINEAR2
+                                                 : PVR_FILTER_TRILINEAR1)
+            : m_Bilinear && !(m_Blend == DC_BLEND_PUNCH && m_PtVariant == 4)
                 ? PVR_FILTER_BILINEAR
                 : PVR_FILTER_NEAREST);
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
         cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
-        // The levels it keeps, picked by bilinear filtering alone (trilinear
-        // doubles the fill).
+        // A page loaded with its levels is always read as one, whatever the
+        // filter (else the chip takes the levels for the page). Bilinear or
+        // point within a level: trilinear would send each polygon twice.
         cxt.txr.mipmap = m_Pages.mip[m_Page] && m_Pages.vq[m_Page]
-            && half == nullptr && m_Bilinear;        // The texture's own alpha is what cuts the colour key out and fades
+            && half == nullptr;        // The texture's own alpha is what cuts the colour key out and fades
         // soft edges; the opaque list has no use for it. (The field is true
         // to disable.)
         cxt.txr.alpha = m_Blend == DC_BLEND_OPAQUE;
@@ -2368,7 +2409,7 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
     // The shadow volumes go to the opaque modifier list, which darkens the
     // opaque and punch-through polygons that take modifiers ("cheap shadow":
     // one colour, scaled inside a volume).
-    if (M_IsShadowed()) {
+    if (M_IsShadowed() && m_Blend != DC_BLEND_TRILINEAR) {
         cxt.fmt.modifier = true;
         cxt.gen.modifier_mode = false;
     }
@@ -2410,6 +2451,12 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
         cxt.blend.src = PVR_BLEND_DESTCOLOR;
         cxt.blend.dst = PVR_BLEND_ZERO;
         break;
+    case DC_BLEND_TRILINEAR:
+        // The chip gives the second level's share as the alpha; a face on a
+        // page with no levels adds nothing.
+        cxt.blend.src = tri_off ? PVR_BLEND_ZERO : PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = tri_off ? PVR_BLEND_ONE : PVR_BLEND_INVSRCALPHA;
+        break;
     default:
         break;
     }
@@ -2424,7 +2471,7 @@ static void M_CachedHeader(pvr_poly_hdr_t *const hdr)
         | ((uint32_t)m_Blend << 16) | ((uint32_t)(m_Current - m_Lists) << 22)
         | (m_DepthTest ? 1u << 25 : 0) | (m_Bilinear ? 1u << 26 : 0)
         | (m_HalfPages ? 1u << 27 : 0) | (M_IsShadowed() ? 1u << 28 : 0)
-        | (M_FogTableOn() ? 1u << 29 : 0);
+        | (M_FogTableOn() ? 1u << 29 : 0) | (m_Trilinear ? 1u << 30 : 0);
     const uint32_t slot = (key * 2654435761u) >> (32 - M_HEADER_CACHE_BITS);
     if (m_HeaderCache[slot].gen != m_HeaderGen
         || m_HeaderCache[slot].key != key) {

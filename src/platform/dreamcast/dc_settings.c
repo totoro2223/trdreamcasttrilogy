@@ -37,12 +37,15 @@ static char m_Refused[256] = "";
 // the fps counter, the two filters, the shadow type, the bump mapping and
 // room cel shading switches, the 3D pickups switch, the enemy shadows one, the
 // memory readout, the load cache, the original enemy simulation one, and the
-// original (linear) pose blend one, the 16:9 screen one, and the Tomb Raider Suite soundtrack one.
+// original (linear) pose blend one, the 16:9 screen one, the Tomb Raider Suite
+// soundtrack one, the leg IK one (the mipmaps one up to format 13) and the
+// trilinear one (always off now).
 // A second line holds the game played last (0 on a disc of one game).
 static void M_Format(char *const out, const size_t size, const int game)
 {
     snprintf(
-        out, size, "12 %d %d %d 0 %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n%d\n",
+        out, size,
+        "14 %d %d %d 0 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n%d\n",
         (int)g_Config.rendering.dc_mode, (int)g_Config.rendering.dc_fps,
         (int)g_Config.rendering.dc_cel_shading,
         (int)g_Config.ui.enable_fps_counter,
@@ -56,7 +59,9 @@ static void M_Format(char *const out, const size_t size, const int game)
         (int)g_Config.rendering.dc_load_cache,
         (int)g_Config.rendering.dc_original_ai,
         (int)g_Config.rendering.dc_linear_pose,
-        (int)g_DC_WidePending, (int)g_Config.audio.dc_suite_music, game);
+        (int)g_DC_WidePending, (int)g_Config.audio.dc_suite_music,
+        (int)g_Config.rendering.dc_leg_ik,
+        0, game);
 }
 
 bool g_DC_WidePending = false;
@@ -78,19 +83,21 @@ void DC_Settings_Load(const char *const saves_dir)
         return;
     }
     int version = 0;
-    int v[18] = {};
+    int v[20] = {};
     const int read = fscanf(
-        fp, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &version,
+        fp, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+        &version,
         &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9],
-        &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17]);
+        &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17],
+        &v[18], &v[19]);
     int stored_game = 0;
     if (fscanf(fp, " %d", &stored_game) != 1) {
         stored_game = 0;
     }
     fclose(fp);
-    const int expected = version >= 12 ? 19 : version >= 11 ? 18 : version >= 10 ? 17 : version >= 9 ? 16 : version >= 8 ? 15 : version >= 7 ? 14 : version >= 6 ? 13 : version >= 5 ? 12 : version >= 3 ? 11 : 8 + version;
+    const int expected = version >= 14 ? 21 : version >= 13 ? 21 : version >= 12 ? 19 : version >= 11 ? 18 : version >= 10 ? 17 : version >= 9 ? 16 : version >= 8 ? 15 : version >= 7 ? 14 : version >= 6 ? 13 : version >= 5 ? 12 : version >= 3 ? 11 : 8 + version;
     // An older, shorter file: the number after its options is the game line.
-    if (read == expected + 1 && version < 12) {
+    if (read == expected + 1 && version < 13) {
         stored_game = v[read - 2];
         v[read - 2] = 0;
     }
@@ -134,6 +141,11 @@ void DC_Settings_Load(const char *const saves_dir)
     if (version <= 11) {
         v[17] = 0;
     }
+    // Before format 14 v[18] was the mipmaps switch, not the leg IK one.
+    if (version <= 13) {
+        v[18] = 0;
+        v[19] = 0;
+    }
     // The adaptive rate (2) is gone: it is plain 60 now.
     if (v[1] == 2) {
         v[1] = DC_FPS_60;
@@ -151,7 +163,7 @@ void DC_Settings_Load(const char *const saves_dir)
     if (v[0] == DC_MODE_EXPERIMENTAL_60) {
         v[0] = DC_MODE_NATIVE_60;
     }
-    if (version < 1 || version > 12
+    if (version < 1 || version > 14
         || (read != expected && read != expected + 1)
         || v[0] < 0
         || v[0] >= DC_MODE_NUMBER_OF || v[1] < 0 || v[1] >= DC_FPS_NUMBER_OF
@@ -195,6 +207,7 @@ void DC_Settings_Load(const char *const saves_dir)
             g_DC_WidePending ? ASPECT_MODE_16_9 : ASPECT_MODE_4_3);
     }
     CONFIG_SET(g_Config.audio.dc_suite_music, (bool)(v[17] != 0));
+    CONFIG_SET(g_Config.rendering.dc_leg_ik, (bool)(v[18] != 0));
     if (g_DC_TestOriginalAI >= 0) {
         CONFIG_SET(
             g_Config.rendering.dc_original_ai, (bool)(g_DC_TestOriginalAI != 0));

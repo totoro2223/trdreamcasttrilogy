@@ -7,6 +7,14 @@
 #include <trx/game/sound.h>
 #include <trx/version.h>
 
+#if defined(__DREAMCAST__)
+    // With Leg IK a walked step is taken by the feet and a body eased up or
+    // down (lara/draw.c), not by its animation.
+    #define M_STEP_ANIMS (!g_Config.rendering.dc_leg_ik)
+#else
+    #define M_STEP_ANIMS true
+#endif
+
 #define M_LF_WALK_STEP_L_START 0
 #define M_LF_WALK_STEP_L_NEAR_END 5
 #define M_LF_WALK_STEP_L_END 6
@@ -290,6 +298,7 @@ static void M_Walk(ITEM *const item, COLL_INFO *const coll)
             && (coll->side_front.floor == NO_HEIGHT
                 || coll->side_front.floor < STEP_L / 2)) {
             coll->side_mid.floor = 0;
+        } else if (!M_STEP_ANIMS) {
         } else if (
             Item_TestAnimEqual(item, LA(LA_WALK_FORWARD))
             && Item_TestFrameRange(
@@ -306,6 +315,7 @@ static void M_Walk(ITEM *const item, COLL_INFO *const coll)
             && (coll->side_front.floor < -STEPUP_HEIGHT
                 || coll->side_front.floor >= STEP_L / 2)) {
             coll->side_mid.floor = 0;
+        } else if (!M_STEP_ANIMS) {
         } else if (
             Item_TestAnimEqual(item, LA(LA_WALK_FORWARD))
             && Item_TestFrameRange(
@@ -358,7 +368,7 @@ static void M_WalkBack(ITEM *const item, COLL_INFO *const coll)
     const ROOM *const room = Room_Get(item->room_num);
     const bool stepping_down = coll->side_mid.floor > STEP_L / 2
         && coll->side_mid.floor < STEPUP_HEIGHT && !room->flags.swamp;
-    if (stepping_down) {
+    if (stepping_down && M_STEP_ANIMS) {
         if (Item_TestFrameRange(
                 item, M_LF_WALK_BACK_R_START, M_LF_WALK_BACK_R_END)) {
             Item_SwitchToAnim(item, LA(LA_WALK_DOWN_BACK_RIGHT), 0);

@@ -475,7 +475,15 @@ echo "== music"
 # AICA plays itself (src/platform/dreamcast/audio.c): ~2.6 MB a minute. Kept
 # between discs; without ffmpeg the game has no music.
 # The files are named by their track number, as the game looks them up.
-MUSIC_CACHE="$BUILD_DIR/music-$GAME-$SOURCE"
+# A track whose peak is below -12 dB is raised to -7 dB: the remastered TR1's
+# ambient tracks (57 at -23 dB, 58 at -17 dB) were lost under the sounds, and
+# at -1 dB they were a little loud.
+MUSIC_CACHE="$BUILD_DIR/music-$GAME-$SOURCE-v3"
+music_gain() {
+  ffmpeg -hide_banner -nostats "$@" -af volumedetect -f null - 2>&1 \
+    | sed -n 's/.*max_volume: \(-*[0-9.]*\) dB.*/\1/p' \
+    | awk '{ g = -7 - $1; print (g > 5 ? g : 0) }'
+}
 mkdir -p "$MUSIC_CACHE" "$STAGE/games/$GAME/music"
 if [ "${TRX_DC_MUSIC:-1}" = 0 ]; then
   # TRX_DC_MUSIC=0: a disc without music.
@@ -526,7 +534,7 @@ for f in "${MUSIC_FILES[@]}"; do
   out="$MUSIC_CACHE/${name%.*}.wav"
   if [ ! -f "$out" ] && command -v ffmpeg > /dev/null; then
     ffmpeg -hide_banner -loglevel error -y -i "$f" -ac 2 -ar 44100 \
-      -c:a adpcm_yamaha "$out"
+      -af "volume=$(music_gain -i "$f")dB" -c:a adpcm_yamaha "$out"
   fi
   [ -f "$out" ] && cp "$out" "$STAGE/games/$GAME/music/"
 done
@@ -546,7 +554,8 @@ if [ "$GAME" = tr1 ] && [ "$SOURCE" = classic ] && [ "${TRX_DC_MUSIC:-1}" != 0 ]
     out="$MUSIC_CACHE/$n.wav"
     if [ ! -f "$out" ]; then
       ffmpeg -hide_banner -loglevel error -y -f s16le -ar 44100 -ac 2 \
-        -i "$f" -c:a adpcm_yamaha "$out"
+        -i "$f" -af "volume=$(music_gain -f s16le -ar 44100 -ac 2 -i "$f")dB" \
+        -c:a adpcm_yamaha "$out"
     fi
     [ -f "$out" ] && cp "$out" "$STAGE/games/$GAME/music/"
   done

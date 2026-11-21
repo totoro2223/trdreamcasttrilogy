@@ -35,6 +35,7 @@ typedef enum {
     M_ROW_SCREEN,
     M_ROW_FPS_COUNTER,
     M_ROW_TEXTURE_FILTER,
+    M_ROW_LEG_IK,
     M_ROW_UI_FILTER,
     M_ROW_MEMORY_HUD,
     M_ROW_LOAD_CACHE,
@@ -158,6 +159,8 @@ static const char *M_Name(const M_ROW row)
         return M_GS("settings/ui.enable_fps_counter/title", "FPS counter");
     case M_ROW_TEXTURE_FILTER:
         return M_GS("settings/rendering.texture_filter/title", "Texture filter");
+    case M_ROW_LEG_IK:
+        return "Leg IK";
     case M_ROW_MEMORY_HUD:
         return M_GS("settings/rendering.dc_memory_hud/title", "Debug mode");
     case M_ROW_LOAD_CACHE:
@@ -201,6 +204,8 @@ static const char *M_Value(const M_ROW row)
         return M_OnOff(g_Config.ui.enable_fps_counter);
     case M_ROW_TEXTURE_FILTER:
         return M_FilterName(g_Config.rendering.texture_filter);
+    case M_ROW_LEG_IK:
+        return M_OnOff(g_Config.rendering.dc_leg_ik);
     case M_ROW_MEMORY_HUD:
         return M_OnOff(g_Config.rendering.dc_memory_hud);
     case M_ROW_LOAD_CACHE:
@@ -306,6 +311,9 @@ static void M_Step(const M_ROW row, const int32_t rate)
     case M_ROW_TEXTURE_FILTER:
         CONFIG_CYCLE(
             g_Config.rendering.texture_filter, rate, TEXTURE_FILTER_NUMBER_OF);
+        break;
+    case M_ROW_LEG_IK:
+        CONFIG_TOGGLE(g_Config.rendering.dc_leg_ik);
         break;
     case M_ROW_MEMORY_HUD:
         CONFIG_TOGGLE(g_Config.rendering.dc_memory_hud);

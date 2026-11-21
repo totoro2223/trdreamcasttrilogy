@@ -739,6 +739,9 @@ typedef struct {
     int32_t bump_n;
     // The mode draws the relief.
     bool bump;
+    // The rooms' opaque faces go twice, for trilinear filtering
+    // (rendering.dc_trilinear, with the mipmaps on).
+    bool trilinear;
     // The cel shading is on: the player's setting, where the mode allows it.
     bool cel;
     // The rooms take it too (rendering.dc_room_cel, M_RoomCel).
@@ -4555,6 +4558,8 @@ static void M_EmitChunk(
 {
     const OUTPUT_MESH_INDEX *const opaque =
         Vector_GetData(bind->mesh->opaque_vertex_indices);
+    const bool tri = m_Frame.trilinear && !faded && chunk->count[0] > 0;
+    DC_PVR_SetTrilinear(tri);
     for (int32_t run = 0; run < 2; run++) {
         if (chunk->count[run] == 0) {
             continue;
@@ -4566,6 +4571,18 @@ static void M_EmitChunk(
                 : run == 0 ? DC_BLEND_OPAQUE
                            : DC_BLEND_PUNCH,
             &page);
+    }
+    if (tri) {
+        // The second pass of the trilinear filtering, over the opaque run
+        // (the cel shading took its faces already).
+        const bool cel_emit = batcher->cel_emit;
+        batcher->cel_emit = false;
+        int32_t page = INT32_MIN;
+        M_EmitIndices(
+            batcher, bind, opaque + chunk->start[0], chunk->count[0],
+            DC_BLEND_TRILINEAR, &page);
+        batcher->cel_emit = cel_emit;
+        DC_PVR_SetTrilinear(false);
     }
 }
 
@@ -7289,6 +7306,11 @@ static void M_EmitIndices(
         }
 #endif
         const int32_t tri_page = env ? DC_PVR_ENV_MAP : bind->page[indices[i]];
+        // Trilinear's second pass only goes over the pages with mipmaps.
+        if (blend == DC_BLEND_TRILINEAR && !DC_PVR_HasMipmaps(tri_page)) {
+            i += 3;
+            continue;
+        }
         if (tri_page != *page) {
             *page = tri_page;
             batcher->emit_page = tri_page;
@@ -8083,7 +8105,7 @@ static void M_BumpGatherLights(
         }
     } else {
         for (int32_t r = 0; r < 3; r++) {
-            light[r] = pos[r] - v[1][r] * (8.0f * WALL_L);
+            light[r] = pos[r] - (1.5f * v[1][r] + v[0][r] + v[2][r]) * (8.0f * WALL_L);
         }
     }
     if (passing > 0.0f) {
@@ -8172,7 +8194,30 @@ static const float m_BumpK[33] = {
     M_BUMP_FLOOR, 1.0f - M_BUMP_FLOOR, M_BUMP_DIM, 1.0f / M_BUMP_DEPTH,
 };
 
-static uint32_t M_BumpVertex(
+// A room lit by the place its vertices are brightest in (no light of its own)
+// shows the relief's shade twice as deep: it was too faint to see. Set per
+// room in M_EmitBump; the shine and a passing light's relief are left alone.
+static float m_BumpBoost;
+
+// by_light (0 to 1) is how much a passing light (a flash, a flare) lights the
+// vertex: its relief is not boosted, and the boost fades out as it comes.
+static uint32_t M_BumpBoost(const uint32_t c, const float by_light)
+{
+    if (by_light >= 1.0f) {
+        return c;
+    }
+    const uint32_t mul = 256u + (uint32_t)((1.0f - by_light) * 256.0f * m_BumpBoost);
+    const uint32_t k1 = c >> 24;
+    const uint32_t k2 = (c >> 16) & 0xFF;
+    const uint32_t k3 = (c >> 8) & 0xFF;
+    const uint32_t k2n = MIN((k2 * mul) >> 8, 255u);
+    const uint32_t k3n = MIN((k3 * mul) >> 8, 255u);
+    // K1 + K2 is the whole colour of a flat texel: it gives up what K2 takes.
+    const uint32_t k1n = k1 > k2n - k2 ? k1 - (k2n - k2) : 0;
+    return (k1n << 24) | (k2n << 16) | (k3n << 8) | (c & 0xFF);
+}
+
+static uint32_t M_BumpVertexRaw(
     const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
     const M_XVERT *const vert, const bool glow, float *const fade,
     float *const by_light)
@@ -8188,7 +8233,12 @@ static uint32_t M_BumpVertex(
         .fade = fade,
         .by_light = by_light,
         .k = m_BumpK,
-        .view1 = { m_Frame.view[1][0], m_Frame.view[1][1], m_Frame.view[1][2] },
+        // Slanted, as Lara's shadow falls: straight overhead leaves the floors flat.
+        .view1 = {
+            1.5f * m_Frame.view[1][0] + m_Frame.view[0][0] + m_Frame.view[2][0],
+            1.5f * m_Frame.view[1][1] + m_Frame.view[0][1] + m_Frame.view[2][1],
+            1.5f * m_Frame.view[1][2] + m_Frame.view[0][2] + m_Frame.view[2][2],
+        },
         .count = lights->count,
         .radius = lights->radius,
         .power = lights->power,
@@ -8222,6 +8272,16 @@ static uint32_t M_BumpVertex(
     }
 #endif
     return colour;
+}
+
+static uint32_t M_BumpVertex(
+    const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
+    const M_XVERT *const vert, const bool glow, float *const fade,
+    float *const by_light)
+{
+    const uint32_t c =
+        M_BumpVertexRaw(lights, frame, vert, glow, fade, by_light);
+    return glow ? c : M_BumpBoost(c, *by_light);
 }
 
 // How much of a face's relief must come from a passing light for the face to
@@ -8657,7 +8717,9 @@ static void M_EmitBumpRange(
                     break;
                 }
                 float fade;
-                k[c] = M_BumpFromCache(e, side, xv[tri[c]].z, &fade);
+                // The kept relief is made with no passing light.
+                k[c] = M_BumpBoost(
+                    M_BumpFromCache(e, side, xv[tri[c]].z, &fade), 0.0f);
                 max_fade = MAX(max_fade, fade);
                 q_min = MIN(q_min, k[c] & 0xFF);
                 q_max = MAX(q_max, k[c] & 0xFF);
@@ -8741,8 +8803,8 @@ static void M_EmitBumpRange(
 #define M_BUMP_ROOM_FULL_CONTRAST 0.5f
 // The power of that light (a light of 0.25 or more gives the relief whole;
 // see M_BumpVertex), at the least contrast and at the fullest.
-#define M_BUMP_ROOM_MIN_POWER 0.125f
-#define M_BUMP_ROOM_MAX_POWER 0.25f
+#define M_BUMP_ROOM_MIN_POWER 0.25f
+#define M_BUMP_ROOM_MAX_POWER 0.5f
 #define M_BUMP_ROOM_CACHE 6
 
 static float M_VertexBrightness(const ROOM_VERTEX *vertex);
@@ -8760,6 +8822,15 @@ static struct {
     float power;
 } m_BumpRooms[M_BUMP_ROOM_CACHE] = {};
 static int32_t m_BumpRoomNext = 0;
+
+// The last bright place found, kept for the rooms that give none: Lara's
+// shadow (M_GatherRoomLight) and the relief both fall from it.
+static struct {
+    bool found;
+    float at[3];
+    float strength;
+    float power;
+} m_LastBright = {};
 
 // The place of the brightest part of the room's vertices and the power of
 // the light that gives, or false when the room has too few vertices or no
@@ -8923,15 +8994,37 @@ static void M_EmitBump(
                 v[0][r] * x + v[1][r] * y + v[2][r] * z + v[3][r];
         }
         lights.radius[lights.count] = M_BUMP_ROOM_RADIUS;
-        lights.power[lights.count] = 1.0f;
+        // A light far off still gives the full relief (its weight fell to a
+        // few hundredths, and the relief faded out with it); only the way it
+        // lights from is taken from it.
+        lights.power[lights.count] = 8.0f;
         lights.passing[lights.count] = false;
         lights.count++;
     }
     // No light in the room: the place its vertices are brightest in.
     float bright_at[3];
     float bright_power;
-    if (lights.count == 0 && room != nullptr
-        && M_RoomBrightLight(room, bright_at, &bright_power)) {
+    bool has_bright = lights.count == 0 && room != nullptr
+        && M_RoomBrightLight(room, bright_at, &bright_power);
+    if (lights.count == 0 && room != nullptr && !has_bright
+        && m_LastBright.found) {
+        // The same place Lara's shadow falls from in a room that gives none.
+        memcpy(bright_at, m_LastBright.at, sizeof(bright_at));
+        bright_power = m_LastBright.power;
+        has_bright = true;
+    }
+    if (lights.count == 0 && room != nullptr && !has_bright) {
+        // Nothing to take it from: a slanted light far above, so that the
+        // relief shows in every room.
+        bright_at[0] = room->pos.x + 40.0f * WALL_L;
+        bright_at[1] = room->pos.y - 40.0f * WALL_L;
+        bright_at[2] = room->pos.z + 40.0f * WALL_L;
+        bright_power = M_BUMP_ROOM_MAX_POWER;
+        has_bright = true;
+    }
+    // Twice the shade in a room with lights, four times where there is none.
+    m_BumpBoost = has_bright ? 3.0f : 1.0f;
+    if (has_bright) {
         sig = M_SigMix(
             M_SigMix(M_SigMix(M_SigMix(sig, bright_at[0]), bright_at[1]),
                 bright_at[2]),
@@ -9248,6 +9341,9 @@ static void M_DrawInstance(
     batcher->cel_emit = batcher->cel && !faded;
     DC_PROBE_START(probe_emit);
     int32_t last_run = -1;
+    const bool tri = m_Frame.trilinear && !faded && !batcher->emitted
+        && bind->needs_room_lights;
+    DC_PVR_SetTrilinear(tri);
     for (int32_t i = 0; !batcher->emitted && i < batcher->range_count; i++) {
         const M_RANGE *const range = &batcher->ranges[i];
         // The header carries the blend too: a new run means a new one.
@@ -9261,6 +9357,23 @@ static void M_DrawInstance(
                 : range->run == 0 ? DC_BLEND_OPAQUE
                                   : DC_BLEND_PUNCH,
             &page);
+    }
+    if (tri) {
+        // The second pass of the trilinear filtering, over the opaque runs
+        // (the cel shading took its faces already).
+        const bool cel_emit = batcher->cel_emit;
+        batcher->cel_emit = false;
+        page = INT32_MIN;
+        for (int32_t i = 0; i < batcher->range_count; i++) {
+            const M_RANGE *const range = &batcher->ranges[i];
+            if (range->run == 0) {
+                M_EmitIndices(
+                    batcher, bind, opaque + range->start, range->count,
+                    DC_BLEND_TRILINEAR, &page);
+            }
+        }
+        batcher->cel_emit = cel_emit;
+        DC_PVR_SetTrilinear(false);
     }
     DC_PROBE_STOP(DC_PROBE_EMIT, probe_emit);
     DC_PROBE_START(probe_tail);
@@ -9353,6 +9466,8 @@ static void M_PrepareFrame(void)
     m_Frame.room_cel = g_Config.rendering.dc_room_cel;
     m_Frame.bump = g_Config.rendering.dc_bump_mapping
         && m_BumpOn && !m_Frame.ortho;
+    m_Frame.trilinear = g_Config.rendering.dc_trilinear
+        && g_Config.rendering.dc_mipmaps && !m_Frame.ortho;
     m_Frame.min_shade = general->min_shade;
     m_Frame.time_in_game = general->time_in_game;
     m_Frame.sunset_duration = general->sunset_duration;
@@ -9368,8 +9483,12 @@ static void M_PrepareFrame(void)
     m_Frame.fog_color[1] = general->fog_color[1];
     m_Frame.fog_color[2] = general->fog_color[2];
     // PLAN_60_FIJO.md phase 6: the native mode's black fog by the PowerVR's
-    // table, by depth as the PSX's, over the same 12 to 20 blocks.
-    m_Frame.fog_table = g_DC_NativeRooms && m_Frame.fog && !m_Frame.ortho
+    // table, by depth as the PSX's, over the same 12 to 20 blocks. The
+    // original mode too, to spare the CPU each vertex's fog (TRX_DC_ASMOFF2
+    // bit 4194304 keeps its fog by distance on the CPU).
+    m_Frame.fog_table =
+        (g_DC_NativeRooms || (g_DC_AsmOff2 & 4194304) == 0) && m_Frame.fog
+        && !m_Frame.ortho
         && m_Frame.fog_color[0] == 0.0f && m_Frame.fog_color[1] == 0.0f
         && m_Frame.fog_color[2] == 0.0f;
     if (m_Frame.fog_table) {
@@ -11507,12 +11626,6 @@ static void M_ConsiderLight(
 #define M_BRIGHT_WEIGHT_MAX 0.7f
 #define M_SUN_WEIGHT 0.5f
 
-static struct {
-    bool found;
-    float at[3];
-    float strength;
-} m_LastBright = {};
-
 // How bright a room vertex is, 0 to 1: TR1 and TR2 keep a shade (0 the
 // brightest), TR3 a colour.
 static float M_VertexBrightness(const ROOM_VERTEX *const vertex)
@@ -11566,6 +11679,7 @@ static int32_t M_GatherRoomLight(
     float power;
     if (M_RoomBrightLight(room, at, &power)) {
         memcpy(m_LastBright.at, at, sizeof(at));
+        m_LastBright.power = power;
         m_LastBright.strength = M_Clamp(
             (power - M_BUMP_ROOM_MIN_POWER)
                 / (M_BUMP_ROOM_MAX_POWER - M_BUMP_ROOM_MIN_POWER),

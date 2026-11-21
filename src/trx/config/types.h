@@ -311,6 +311,9 @@ typedef struct {
         bool dc_room_cel;
         DC_OBJECT_SHADOWS dc_object_shadows;
         bool dc_memory_hud;
+        bool dc_mipmaps;
+        bool dc_trilinear;
+        bool dc_leg_ik;
         bool dc_load_cache;
         bool dc_original_ai;
         bool dc_linear_pose;

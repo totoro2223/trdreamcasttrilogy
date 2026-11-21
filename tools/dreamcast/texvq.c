@@ -63,6 +63,10 @@ typedef struct {
     uint16_t texels[PAGE_SIZE];
     uint8_t vq[VQ_BYTES];
     uint8_t mip[MIP_BYTES];
+    // A level's room faces use it (mip_ok), and no face or sprite of any
+    // level draws it with alpha, nor an injection holds it (mip_no).
+    int mip_ok;
+    int mip_no;
 } PAGE;
 
 static PAGE *m_Pages = NULL;
@@ -83,6 +87,7 @@ static int m_BumpCount = 0;
 // An object texture as the game holds it once the level is loaded.
 typedef struct {
     uint16_t page;
+    uint16_t draw;
     uint16_t u[4];
     uint16_t v[4];
     int corners;
@@ -94,6 +99,8 @@ typedef struct {
     uint8_t used[MAX_TEXTURES];
     TEXTURE *textures;
     int32_t count;
+    // The pages sprites use (a bit a page, the first 256).
+    uint8_t sprite_pages[32];
 } LEVEL;
 
 static LEVEL m_Level;
@@ -110,20 +117,64 @@ static uint32_t Hash(const void *const data, const size_t size)
     return h;
 }
 
-static void AddPage(const uint16_t *const texels, const uint32_t format)
+static int AddPage(const uint16_t *const texels, const uint32_t format)
 {
     const uint32_t hash = Hash(texels, PAGE_SIZE * 2);
     for (int i = 0; i < m_Count; i++) {
         if (m_Pages[i].hash == hash && m_Pages[i].format == format) {
-            return;
+            return i;
         }
     }
     m_Pages = realloc(m_Pages, sizeof(PAGE) * (m_Count + 1));
     PAGE *const page = &m_Pages[m_Count++];
     page->hash = hash;
     page->format = format;
+    page->mip_ok = 0;
+    page->mip_no = 0;
     memcpy(page->texels, texels, PAGE_SIZE * 2);
+    return m_Count - 1;
 }
+
+// Whether a level page may keep its mipmaps: some room face draws from it,
+// and no texture (draw type other than 0, opaque) nor sprite uses it with
+// alpha. Without the level's textures read, none may.
+static void MarkMip(
+    const int index, const int32_t level_page, const uint16_t *const texels)
+{
+    if (m_Level.count <= 0) {
+        m_Pages[index].mip_no = 1;
+        return;
+    }
+    int room = 0;
+    int alpha = level_page < 256
+        && (m_Level.sprite_pages[level_page >> 3] & (1 << (level_page & 7)));
+    for (int32_t i = 0; i < m_Level.count; i++) {
+        const TEXTURE *const t = &m_Level.textures[i];
+        if (t->page != level_page) {
+            continue;
+        }
+        room |= m_Level.used[i] != 0;
+        alpha |= t->draw != 0;
+        // A see-through texel under an opaque texture still makes the game
+        // cut it out (punch-through).
+        int u0 = 255, v0 = 255, u1 = 0, v1 = 0;
+        for (int k = 0; k < t->corners; k++) {
+            const int u = t->u[k] >> 8, v = t->v[k] >> 8;
+            u0 = u < u0 ? u : u0;
+            u1 = u > u1 ? u : u1;
+            v0 = v < v0 ? v : v0;
+            v1 = v > v1 ? v : v1;
+        }
+        for (int v = v0; v <= v1 && !alpha; v++) {
+            for (int u = u0; u <= u1 && !alpha; u++) {
+                alpha = (texels[v * PAGE_W + u] & 0x8000) == 0;
+            }
+        }
+    }
+    m_Pages[index].mip_ok |= room;
+    m_Pages[index].mip_no |= alpha;
+}
+
 
 // As texture_pages_16.h does it.
 static uint16_t ToARGB1555(const uint8_t *const c)
@@ -151,7 +202,9 @@ static void AddRGBAPage(const uint8_t *const rgba)
     for (int i = 0; i < PAGE_SIZE; i++) {
         texels[i] = format ? ToARGB4444(&rgba[i * 4]) : ToARGB1555(&rgba[i * 4]);
     }
-    AddPage(texels, format);
+    // (AddPage may move m_Pages: the index first.)
+    const int index = AddPage(texels, format);
+    m_Pages[index].mip_no = 1;
 }
 
 static uint8_t *ReadFile(const char *const path, size_t *const size)
@@ -228,6 +281,20 @@ static void SkipArrS32(CURSOR *const c, const int64_t item)
 static void SkipArrU16(CURSOR *const c, const int64_t item)
 {
     CursorSkip(c, (int64_t)CursorU16(c) * item);
+}
+
+// The sprite textures (16 bytes, the page first), noting their pages.
+static void ReadSprites(CURSOR *const c)
+{
+    memset(m_Level.sprite_pages, 0, sizeof(m_Level.sprite_pages));
+    const int32_t count = CursorS32(c);
+    for (int32_t i = 0; i < count && !c->bad; i++) {
+        const int32_t page = CursorU16(c);
+        CursorSkip(c, 14);
+        if (page < 256) {
+            m_Level.sprite_pages[page >> 3] |= 1 << (page & 7);
+        }
+    }
 }
 
 // The rooms, noting the textures their faces use (sections/rooms.c): each
@@ -311,8 +378,8 @@ static void ReadTextures(CURSOR *const c, const int version)
     m_Level.count = count;
     for (int32_t i = 0; i < count; i++) {
         TEXTURE *const texture = &m_Level.textures[i];
-        CursorSkip(c, 2); // draw type
-        texture->page = (uint16_t)CursorU16(c);
+        texture->draw = (uint16_t)CursorU16(c);
+        texture->page = (uint16_t)CursorU16(c) & 0x7FFF;
         int16_t uv[8];
         for (int k = 0; k < 8; k++) {
             uv[k] = (int16_t)CursorU16(c);
@@ -421,7 +488,7 @@ static void ReadLevel(
             SkipArrS32(&c, items[i]);
         }
         if (version == 3) {
-            SkipArrS32(&c, 16); // sprite textures
+            ReadSprites(&c);
             SkipArrS32(&c, 8); // sprite sequences
             SkipArrS32(&c, 16); // cameras
             SkipArrS32(&c, 16); // sound sources
@@ -432,6 +499,9 @@ static void ReadLevel(
             SkipArrS32(&c, 2); // animated textures
         }
         ReadTextures(&c, version);
+        if (version == 2) {
+            ReadSprites(&c);
+        }
         if (c.bad) {
             fprintf(
                 stderr, "texvq: a TR%d level that does not add up; no relief\n",
@@ -442,7 +512,7 @@ static void ReadLevel(
     for (int32_t i = 0; i < count; i++) {
         uint16_t texels[PAGE_SIZE];
         memcpy(texels, data + pages_16 + (size_t)i * PAGE_SIZE * 2, sizeof(texels));
-        AddPage(texels, 0);
+        MarkMip(AddPage(texels, 0), i, texels);
         AddBump(i, texels);
     }
 }
@@ -466,6 +536,8 @@ static void ReadLevelTR1(const uint8_t *const data, const size_t size)
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]) && !c.bad; i++) {
         if (i == 11) {
             ReadTextures(&c, 1);
+        } else if (i == 12) {
+            ReadSprites(&c);
         } else {
             SkipArrS32(&c, items[i]);
         }
@@ -499,7 +571,7 @@ static void ReadLevelTR1(const uint8_t *const data, const size_t size)
                                       rgb[index][2], index == 0 ? 0 : 255 };
             texels[j] = ToARGB1555(rgba);
         }
-        AddPage(texels, 0);
+        MarkMip(AddPage(texels, 0), i, texels);
         AddBump(i, texels);
     }
 }
@@ -1185,10 +1257,16 @@ int main(int argc, char **argv)
     for (int i = 0; i < m_Count; i++) {
         Compress(&m_Pages[i]);
     }
+    // Only the pages of the rooms that nothing draws with alpha keep their
+    // mipmaps (bit 31 of the position marks the others): with alpha, Flycast
+    // drew them corrupt (29/10/2026: Lara, the font, the passport).
     uint32_t (*const index)[2] = malloc(sizeof(*index) * m_Count);
+    int opaque = 0;
     for (int i = 0; i < m_Count; i++) {
+        const bool solid = m_Pages[i].mip_ok && !m_Pages[i].mip_no;
+        opaque += solid;
         index[i][0] = m_Pages[i].hash;
-        index[i][1] = i;
+        index[i][1] = (uint32_t)i | (solid ? 0u : 0x80000000u);
     }
     qsort(index, m_Count, sizeof(*index), CompareHash);
 
@@ -1198,11 +1276,12 @@ int main(int argc, char **argv)
         return 1;
     }
     const uint32_t count = m_Count;
-    // TRX_MIP=1 writes the pages with their mipmaps ("TVQ2"). Off by default:
-    // in Flycast the pages with see-through texels (Lara, the font, the
-    // passport) came out corrupt with them, even with the level bias at 0.25,
-    // while the data decodes right (29/10/2026, unsolved).
-    const bool no_mip = getenv("TRX_MIP") == NULL;
+    // TRX_MIP=0 writes the pages without mipmaps ("TVQ1"), as before.
+    const char *const mip_env = getenv("TRX_MIP");
+    const bool no_mip = mip_env != NULL && strcmp(mip_env, "0") == 0;
+    if (!no_mip) {
+        printf("texvq: %d of %d pages with mipmaps\n", opaque, m_Count);
+    }
     fwrite(no_mip ? "TVQ1" : "TVQ2", 1, 4, fp);
     fwrite(&count, 4, 1, fp);
     fwrite(index, sizeof(*index), m_Count, fp);

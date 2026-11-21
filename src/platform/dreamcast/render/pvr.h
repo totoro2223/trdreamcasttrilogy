@@ -37,6 +37,10 @@ typedef enum {
     // The same relief, its alpha added as white light: the slopes turned to
     // the light shine (K1 and K2 nought, K3 the strength).
     DC_BLEND_BUMP_GLOW,
+    // The second pass of trilinear filtering over the room faces just drawn
+    // (DC_PVR_SetTrilinear): the next level, blended in by the chip's own
+    // fraction of the way between the two.
+    DC_BLEND_TRILINEAR,
     DC_BLEND_COUNT,
 } DC_BLEND;
 
@@ -210,6 +214,11 @@ void DC_PVR_DrawPictureBox(
     float x0, float y0, float x1, float y1, float opacity);
 
 void DC_PVR_SetFilter(bool bilinear);
+// Trilinear filtering for the opaque faces on pages with mipmaps sent from
+// now on: their first pass (the faces must go again as DC_BLEND_TRILINEAR).
+void DC_PVR_SetTrilinear(bool on);
+// The level page was loaded with its mipmaps.
+bool DC_PVR_HasMipmaps(int32_t page);
 // Pages drawn from here on sample a copy at half their size, made for them
 // as they are first drawn so (unfiltered text drawn smaller than its texels
 // keeps its strokes).

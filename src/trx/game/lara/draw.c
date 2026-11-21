@@ -1,5 +1,6 @@
 #include <trx/game/lara/draw.h>
 
+
 #include <trx/config.h>
 #include <trx/core/math/geom.h>
 #include <trx/game/camera.h>
@@ -42,6 +43,199 @@ typedef enum {
 
 static bool m_CacheMatrices = false;
 static bool m_IsLara = true;
+
+#if defined(__DREAMCAST__)
+    #include <math.h>
+
+// Leg IK (option "Leg IK"): while Lara is on her feet, each foot goes onto the floor
+// under it and the hips come down as far as the lower foot needs. Drawing
+// only: her position, collision and animations are untouched. Each leg is a
+// two-bone chain solved in closed form; the thigh, calf and foot get an extra
+// pitch, the hips an extra drop, eased in and out.
+    #define M_IK_REACH 128 // a foot further from her floor than this is left
+    #define M_IK_EASE 0.25f
+    // The foot also pitches with the slope under it, up to 30 degrees, read
+    // over this far ahead and behind. A rise bigger than a walkable slope
+    // gives over that span is a step, and the foot stays as animated.
+    #define M_IK_SLOPE_SPAN 64
+    #define M_IK_SLOPE_STEP 72
+    #define M_IK_MAX_PITCH 0.5235988f
+    // A drop or rise of her y in one drawn frame between these is a step
+    // (slopes move her less), and the body is eased onto it at this rate.
+    #define M_IK_STEP_MIN 24
+    #define M_IK_STEP_EASE 0.15f
+static float m_IKRot[LM_NUMBER_OF];
+static float m_IKDrop;
+// The body is drawn this far below her y, after a step, easing to 0.
+static float m_IKStep;
+static int32_t m_IKLastY;
+// The extra pitch of a mesh, 0 for any but Lara's legs.
+static int16_t m_IKAngle[LM_NUMBER_OF];
+static int32_t m_IKDropUnits;
+
+static XYZ_32 M_IKPos(void)
+{
+    return (XYZ_32) {
+        g_WMatrixPtr->_03 >> W2V_SHIFT,
+        g_WMatrixPtr->_13 >> W2V_SHIFT,
+        g_WMatrixPtr->_23 >> W2V_SHIFT,
+    };
+}
+
+static float M_IKLength(const XYZ_32 v)
+{
+    return sqrtf((float)v.x * v.x + (float)v.y * v.y + (float)v.z * v.z);
+}
+
+// The angle facing side c of a triangle of sides a, b and c.
+static float M_IKAngle(const float a, const float b, const float c)
+{
+    float cos = (a * a + b * b - c * c) / (2.0f * a * b);
+    cos = cos < -1.0f ? -1.0f : (cos > 1.0f ? 1.0f : cos);
+    return acosf(cos);
+}
+
+// The states where her feet are on the floor: standing, walking, running,
+// turning and stepping. The offset each foot gets is the floor under it
+// against hers, so a lifted foot stays lifted by as much as the animation has.
+static bool M_IKOnFeet(const int16_t state)
+{
+    return state == LS(LS_STOP) || state == LS(LS_WALK) || state == LS(LS_RUN)
+        || state == LS(LS_WALK_BACK) || state == LS(LS_FAST_BACK)
+        || state == LS(LS_TURN_RIGHT) || state == LS(LS_TURN_LEFT)
+        || state == LS(LS_FAST_TURN) || state == LS(LS_STEP_RIGHT)
+        || state == LS(LS_STEP_LEFT);
+}
+
+// The floor at x, z against hers, read from just above her floor so that the
+// room below is not taken.
+static int32_t M_IKFloor(const ITEM *const item, const int32_t x, const int32_t z)
+{
+    XYZ_32 at = { x, item->pos.y - STEP_L / 2, z };
+    int16_t room_num = item->room_num;
+    const SECTOR *const sector = Room_GetSector(at, &room_num);
+    at.y = item->pos.y;
+    return Room_GetHeight(sector, at) - item->pos.y;
+}
+
+static void M_IKUpdate(const ITEM *const item, const ANIM_BONE *const bone)
+{
+    float target[LM_NUMBER_OF] = {};
+    float drop = 0.0f;
+    const LARA_INFO *const lara = Lara_GetLaraInfo();
+    ANIM_FRAME *frames[2] = {};
+    int32_t rate;
+    Item_GetFrames(item, frames, &rate);
+    const bool on_feet = g_Config.rendering.dc_leg_ik && frames[0] != nullptr
+        && M_IKOnFeet(item->current_anim_state) && !item->gravity
+        && lara->water_status == LWS_ABOVE_WATER && !Lara_Vehicle_IsMounted()
+        && Lara_Pose_Get() == nullptr;
+    // A step she was snapped onto: the body starts where it was.
+    const int32_t y = item->interp.result.pos.y;
+    const int32_t dy = y - m_IKLastY;
+    m_IKLastY = y;
+    if (on_feet && ABS(dy) >= M_IK_STEP_MIN && ABS(dy) <= STEPUP_HEIGHT) {
+        m_IKStep -= (float)dy;
+    }
+    if (on_feet) {
+        const ANIM_FRAME *const frame = frames[0];
+        const XYZ_16 *const rots = Anim_GetFrameRots(frame);
+        XYZ_32 hip[2];
+        XYZ_32 ankle[2];
+        int32_t floor[2];
+        float slope[2] = {};
+        const float yaw = item->rot.y * (3.14159265f / 32768.0f);
+        const int32_t dx = (int32_t)(sinf(yaw) * M_IK_SLOPE_SPAN);
+        const int32_t dz = (int32_t)(cosf(yaw) * M_IK_SLOPE_SPAN);
+        for (int32_t leg = 0; leg < 2; leg++) {
+            const LARA_MESH thigh = leg == 0 ? LM_THIGH_L : LM_THIGH_R;
+            Matrix_PushUnit();
+            Matrix_Rot16(item->rot);
+            Matrix_TranslateRel16(frame->offset);
+            Matrix_Rot16(rots[LM_HIPS]);
+            Matrix_TranslateRel32(bone[thigh - 1].pos);
+            hip[leg] = M_IKPos();
+            Matrix_Rot16(rots[thigh]);
+            Matrix_TranslateRel32(bone[thigh].pos);
+            Matrix_Rot16(rots[thigh + 1]);
+            Matrix_TranslateRel32(bone[thigh + 1].pos);
+            ankle[leg] = M_IKPos();
+            Matrix_Pop();
+
+            const int32_t x = item->pos.x + ankle[leg].x;
+            const int32_t z = item->pos.z + ankle[leg].z;
+            // Against where the body is drawn, during a step.
+            floor[leg] = M_IKFloor(item, x, z) - (int32_t)m_IKStep;
+            if (floor[leg] < -M_IK_REACH && floor[leg] >= -STEPUP_HEIGHT) {
+                floor[leg] = -M_IK_REACH; // the step up: as high as she bends
+            }
+            if (floor[leg] > M_IK_REACH || floor[leg] < -M_IK_REACH) {
+                floor[leg] = 0; // a ledge or a wall: as the animation has it
+            } else {
+                // The slope along her facing, under this foot: positive when
+                // the floor rises ahead (a positive pitch lifts the toes).
+                const int32_t ahead =
+                    M_IKFloor(item, x + dx, z + dz) - M_IKFloor(item, x - dx, z - dz);
+                if (ahead <= M_IK_SLOPE_STEP && ahead >= -M_IK_SLOPE_STEP) {
+                    float pitch = atan2f((float)-ahead, 2.0f * M_IK_SLOPE_SPAN);
+                    pitch = pitch > M_IK_MAX_PITCH ? M_IK_MAX_PITCH : pitch;
+                    pitch = pitch < -M_IK_MAX_PITCH ? -M_IK_MAX_PITCH : pitch;
+                    slope[leg] = pitch;
+                }
+            }
+            if (floor[leg] > drop) {
+                drop = (float)floor[leg];
+            }
+        }
+        for (int32_t leg = 0; leg < 2; leg++) {
+            const LARA_MESH thigh = leg == 0 ? LM_THIGH_L : LM_THIGH_R;
+            const float l1 = M_IKLength(bone[thigh].pos);
+            const float l2 = M_IKLength(bone[thigh + 1].pos);
+            XYZ_32 rel = {
+                ankle[leg].x - hip[leg].x,
+                ankle[leg].y - hip[leg].y,
+                ankle[leg].z - hip[leg].z,
+            };
+            const float lo = fabsf(l1 - l2) + 1.0f;
+            const float hi = l1 + l2 - 1.0f;
+            float d = M_IKLength(rel);
+            d = d < lo ? lo : (d > hi ? hi : d);
+            // The leg is shorter by what the hips come down past this foot.
+            rel.y -= (int32_t)drop - floor[leg];
+            float d2 = M_IKLength(rel);
+            d2 = d2 < lo ? lo : (d2 > hi ? hi : d2);
+            // The thigh turns the knee forward, the calf bends back by the
+            // knee's change and the foot keeps its pitch.
+            const float t = M_IKAngle(l1, d2, l2) - M_IKAngle(l1, d, l2);
+            const float c = M_IKAngle(l1, l2, d2) - M_IKAngle(l1, l2, d);
+            target[thigh] = t;
+            target[thigh + 1] = c;
+            target[thigh + 2] = -(t + c) + slope[leg];
+        }
+    }
+
+    m_IKDrop += (drop - m_IKDrop) * M_IK_EASE;
+    m_IKStep -= m_IKStep * M_IK_STEP_EASE;
+    m_IKDropUnits = (int32_t)(m_IKDrop + m_IKStep);
+    for (int32_t i = 0; i < LM_NUMBER_OF; i++) {
+        m_IKRot[i] += (target[i] - m_IKRot[i]) * M_IK_EASE;
+        m_IKAngle[i] = (int16_t)(m_IKRot[i] * (32768.0f / 3.14159265f));
+    }
+}
+
+// The extra pitch IK gives a mesh, after its own rotation.
+static void M_IKApply(const LARA_MESH mesh, const bool interpolated)
+{
+    if (!m_IsLara) {
+        return;
+    }
+    if (interpolated) {
+        Matrix_RotX_I(m_IKAngle[mesh]);
+    } else {
+        Matrix_RotX(m_IKAngle[mesh]);
+    }
+}
+#endif
 
 static M_ARMS M_GetArms(const LARA_GUN_TYPE gun_type)
 {
@@ -238,11 +432,17 @@ static void M_DrawBodyPart(
     if (mesh_rots_2 != nullptr) {
         Matrix_TranslateRel32_I(bone[mesh - 1].pos);
         Matrix_Rot16_ID(mesh_rots_1[mesh], mesh_rots_2[mesh]);
+#if defined(__DREAMCAST__)
+        M_IKApply(mesh, true);
+#endif
         M_CacheMatrix(mesh);
         M_DrawLaraMesh(Lara_GetItem(), mesh, clip, true);
     } else {
         Matrix_TranslateRel32(bone[mesh - 1].pos);
         Matrix_Rot16(mesh_rots_1[mesh]);
+#if defined(__DREAMCAST__)
+        M_IKApply(mesh, false);
+#endif
         M_CacheMatrix(mesh);
         M_DrawLaraMesh(Lara_GetItem(), mesh, clip, false);
     }
@@ -316,6 +516,11 @@ static bool M_Draw_I(
 
     Matrix_InitInterpolate(frac, rate);
     Matrix_TranslateRel16_ID(frame1->offset, frame2->offset);
+#if defined(__DREAMCAST__)
+    if (m_IsLara && m_IKDropUnits != 0) {
+        Matrix_TranslateRel32_I((XYZ_32) { 0, m_IKDropUnits, 0 });
+    }
+#endif
     Matrix_Rot16_ID(mesh_rots_1[LM_HIPS], mesh_rots_2[LM_HIPS]);
     M_CacheMatrix(LM_HIPS);
     M_DrawLaraMesh(item, LM_HIPS, clip, true);
@@ -549,6 +754,9 @@ static bool M_Draw(const ITEM *const item)
     m_IsLara = item == lara_item;
     if (m_IsLara) {
         Output_Water_ObserveLaraFrame();
+#if defined(__DREAMCAST__)
+        M_IKUpdate(item, Lara_Skin_GetBoneBase());
+#endif
     }
     if (m_IsLara
         && (!item->is_visible || item->trigger.spent || item->mesh_bits == 0)) {
@@ -627,6 +835,11 @@ static bool M_Draw(const ITEM *const item)
     const XYZ_16 *mesh_rots = pose != nullptr ? pose->rots : Anim_GetFrameRots(frame);
 
     Matrix_TranslateRel16(pose != nullptr ? pose->offset : frame->offset);
+#if defined(__DREAMCAST__)
+    if (m_IsLara && m_IKDropUnits != 0) {
+        Matrix_TranslateRel32((XYZ_32) { 0, m_IKDropUnits, 0 });
+    }
+#endif
     Matrix_Rot16(mesh_rots[LM_HIPS]);
     M_CacheMatrix(LM_HIPS);
     M_DrawLaraMesh(item, LM_HIPS, clip, false);
