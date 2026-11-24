@@ -1,0 +1,56 @@
+﻿date 2026-11-24 16:07:44
+build DC build 991
+game tr3
+demo 0
+mode 4 (640x480), shadows 2, bump 0, 60 fps
+frames 5660 in 94634 ms
+fps avg 59.8, min 22.2, best frame 3.8 ms
+frame ms: median 17, 99% under 34, worst 45.0
+frames over 35 ms: 28 (0%)
+presented 5624, gaps over 20 ms 165 (2%), over 40 ms 0
+per frame, average / worst (ms, or counts and KiB):
+  logic  3.3 / 38.3
+  stage  2.8 / 14.9
+  pass   5.2 / 12.8
+  submit 5.2 / 23.1
+  map    0.0 / 0.0
+  mwait  0.0 / 0.0
+  wait   0.0 / 0.0
+  pvr    7.5 / 10.0
+  polys  730 / 2197
+  inst   31 / 57
+  verts  5112 / 15724
+  OP     98 / 234 KiB
+  TR     17 / 51 KiB
+  PT     0 / 0 KiB
+  MOD    0 / 0 KiB
+  xform  3.7 / 11.2
+probes, average per frame (us or counts):
+  ev=0 lua=0 rem=0 inp=0 items=0 fx=0 lara=0 post=0 end=0 ctrl=0 mctl=0 flip=0 log=0 tcyc=0
+  tuvw=0 tcomp=0 vroom=2471 vobj=2351 vgen=289 soft=0 emit=0 cel=0 bump=0 envp=0 sscene=0
+  spre=0 sbounds=0 ssky=0 sroom=0 sstat=0 sitem=0 slara=0 sfx=0 spaint=0 sgflush=0 sui=0
+  soflush=0 nrooms=2 llight=0 lshadow=0 lmesh=0 lwater=0 ljoint=0 lhair=0 lequip=0 lblend=0
+  troom=0 tplain=0 tgen=0 gown=275 genv=0 gfog=0 gbill=0 goth=13 equad=0 etri=0 eclip=23
+  eout=1 eback=0 msil=0 mend=0 src0=0 src1=0 src2=0 src3=0 src4=0 src5=0 src6=0 src7=0
+  src8=0 src9=0 plprep=0 pvol=0 ppsoft=0 pdrawi=0 ptransp=0 pntransp=8 udraw=0 uops=0
+  ilight=0 lweld=0 aruns=98 afaces=1253 acfaces=32 aempty=9 rall=738 rplain=0 rdyn=0
+  rflick=0 rvary=0 rnw=2 rfog=0 rhit=1 ctest=0 chide=0 croom=0 qtest=0 qhide=0 otest=5
+  ohide=0 otime=0 ectl=0 ectln=0 edraw=0 edrawn=0 ownf=289 owns=0 groom=0 gobj=0 gfogc=0
+  genvc=0 gother=0 iwalk=0 imesh=0 eclipc=0 ebackc=0 dpre=0 dpost=0 dtail=0 sefr=0 sfxm=0
+  sspk=0 srope=0 sflare=0 mphase=0 mlua=0 mbegin=0 mevict=0 ltarget=0 lsmash=0 lhairc=0
+frame length histogram (ms: frames):
+  3:15 4:58 5:46 6:78 7:169 8:199 9:233 10:188 11:103 12:85 13:110 14:153 15:170 16:2375
+  17:175 18:189 19:226 20:157 21:132 22:133 23:97 24:81 25:113 26:121 27:42 28:37 29:33
+  30:34 31:23 32:23 33:20 34:14 35:10 36:7 37:3 38:3 40:1 42:1 43:1 44:1 45:1
+frame length by frame (ms), 24 a line, from the middle:
+ 2782: 8 19 9 21 9 36 9 20 9 19 9 21 9 19 10 28 9 20 10 21 10 27 9 21
+ 2806: 10 19 10 29 9 19 10 23 10 26 9 21 10 23 9 21 10 31 9 22 9 19 9 27
+ 2830: 8 19 9 21 9 30 9 22 9 19 9 29 9 19 9 28 8 19 9 19 9 32 8 18
+ 2854: 9 24 8 28 8 17 8 25 9 29 8 18 8 26 8 21 9 30 8 18 8 33 7 18
+ logic (1/4 ms) from frame 2830: 2 9 2 17 2 56 2 25 2 9 2 47 2 9 2 45 2 9 2 9 2 62 2 9
+ stage (1/4 ms) from frame 2830: 12 19 15 16 12 16 15 16 12 19 15 16 12 19 15 16 12 18 15 15 12 15 12 18
+ pass (1/4 ms) from frame 2830: 13 41 13 44 16 41 13 42 13 42 14 46 14 43 14 46 13 43 14 45 17 44 13 39
+ map (1/4 ms) from frame 2830: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+ frame (ms) from frame 2830: 8 19 9 21 9 30 9 22 9 19 9 29 9 19 9 28 8 19 9 19 9 32 8 18
+worst frames (60 ms or more), worst first, times in tenths of ms; under each, the probes over 1 ms:
+summary: BENCH 5660 frames  avg 59.8 fps  min 22.2  slow 0% | logic 3.3 stage 2.8 pass 5.2 map 0.0 pvr 7.5 ms

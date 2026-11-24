@@ -457,3 +457,88 @@ paso, sombras Hard de largo fijo, texturas de TR3 en VQ.
 | Música ambiental del remaster casi muda: `make_disc.sh` sube a -7 dB de pico las pistas que no pasan de -12 dB (caché `music-<juego>-<origen>-v3`; a -1 dB sonaban algo altas) | OK en Flycast, oído SIN COMPROBAR | TR1 remaster: 57 (Perú) pico -23,1 → -0,4 dB, media -47,8 → -25,7 dB; 58 pico -16,8 → -1,1 dB; la 3 y la 59 igual. El nivel 1 toca la 57 en bucle sin errores (DC builds 1432 / 1433) |
 | IK de piernas (opción «Leg IK» en Gráficos, apagada; formato 14 de ajustes, `v[18]`): con Lara quieta en el suelo, cada pie va al suelo bajo él (hasta ±128), la cadera baja lo que pida el pie más bajo; muslo, pantorrilla y pie con giro X extra (dos huesos en forma cerrada), con suavizado. Solo dibujo (`lara/draw.c`) | OK en Flycast (números), imagen y consola SIN VER | Autocomprobación con un hueco falso de 64 bajo el pie izquierdo: ese tobillo baja 64; el otro baja 4 en vez de 0 (no se corrige el giro de la línea cadera-tobillo) y la rodilla va hacia delante (z 22 → 96). TR1 nivel 1 (DC builds 1455-1456). Coste sin medir aparte: dos consultas de suelo y 4 `acosf` por frame |
 | IK de piernas en movimiento y en escalones: también andando, corriendo, girando y de lado; el pie se inclina con la pendiente bajo él (hasta 30°, escalón si sube más de 72 en 128); con la opción, sin animaciones de escalón andando (`col/land.c`, `M_STEP_ANIMS`) y el cuerpo se suaviza hasta la nueva altura | Compila; imagen SIN VER | DC builds 1458-1464. IK de brazos (mano en la pared más cercana, sin armas): **FALLIDO**, no quedaba bien (build 1462), quitado del código |
+
+### Precalculado contra cálculo por frame: dos intentos sin ganancia (24/11/2026)
+
+Pedido: aliviar la CPU con algo precalculado. Lo que no depende de la cámara ya
+está horneado (vértices únicos por lote, color por lote, descarte por lote,
+escena grabada del tick); la posición en pantalla sí depende de ella. Se
+probaron las dos ideas que quedaban, TR3 Antártida (nivel 16), Original 60,
+Flycast oculto, mismo disco y sin sondas:
+
+| Idea | Resultado | Medida |
+|---|---|---|
+| Niebla por lote: un lote entero antes del inicio de la niebla se hornea y se ilumina como sin niebla (clave sin niebla, sin `dc_fog_colours`) | **Sin ganancia, revertida** | `pass` 11,00 → 10,98 ms, `xform` 8,27 → 8,23 ms; la vista inicial casi no tiene lotes enteros antes de la niebla |
+| uv en float por esquina (`uvf`, +250 KB en la Antártida, 62 224 esquinas) para que `dc_emit_run_map` copie en vez de convertir | **Sin ganancia, revertida** | `pass` 11,00 → 10,98 ms; Flycast no modela el coste por instrucción de la SH-4, así que puede notarse más en consola, pero no hay dato |
+
+- Oclusión por celdas (PVS por sector): ya medida (fila «Techo de la visibilidad precalculada»): -3 % de vértices; no se reactiva.
+- Build `strict` (memoria con basura) y Flycast con `-config config:FullMMU=yes`: TR2 Gran Muralla y TR3 Antártida, 80 s cada una, sin excepciones; `[native-check]` (188 526 y 1 220 652 esquinas) y `[obj-check]` con 0 distintas. No consta que Flycast haya aplicado `FullMMU` (`emu.cfg` no la tiene). TR1 no probado (la ruta de datos de TR1 no es la del remaster). Consola real: sin probar.
+
+- **Posiciones únicas frente a vértices horneados (24/11/2026)**: sonda temporal en `M_BakeNative` (retirada), TR3 Antártida, 203 salas: 62 224 esquinas, 21 329 vértices horneados en lotes, 21 072 posiciones distintas dentro de los lotes (-1 %), 17 932 posiciones distintas por sala (-16 %). Transformar cada posición una sola vez no da casi nada: el vértice ya se comparte bien. Compartir entre lotes ahorraría como mucho ese 16 % a costa de lotes más grandes y menos descarte por lote.
+
+### Experimento: el segundo frame de cada tick como «warp» del primero (24/11/2026, sin commit)
+
+Idea de cambio de lógica: el frame que sigue al primero de un tick no se dibuja; se reenvían las listas del primero con las posiciones x e y del mundo desplazadas por el giro de la cámara (de la vista mezclada a la del tick), sin transformar ni emitir nada. La interfaz (lo que se dibuja tras la fase) no se mueve. Apagado por defecto; `TRX_DC_ASMOFF2` bit 67108864 lo enciende. Código: `DC_PVR_MarkWorld`/`DC_PVR_WarpFrame` (`pvr.c`), `DC_Batcher_WarpShift` (`batcher.c`), `DC_Replay_Warp` (`compositor.c`), `Output_WarpFrame` (`output_common.c`), gancho en `M_ThreadedDraw` (`executor.c`). Cae al dibujo normal si la lista de volúmenes no está vacía, si el frame perdió polígonos o si el giro pasa de 40 px.
+
+| Escena (Flycast oculto, Native 60) | Sin warp | Con warp |
+|---|---|---|
+| TR3 Antártida (vista inicial, cámara quieta) | 59,2 fps, `pass` 11,0 ms | 52-54 fps, `pass` 6,7 ms |
+| TR3 Londres (demo, cámara en movimiento) | ~60 fps, `pass` 4,6 ms | ~57-60 fps, `pass` 3,2 ms |
+
+- El warp reduce el trabajo (`pass` medio -40 %) pero **no sube los fps en la Antártida: los baja**. El primer frame sigue costando más de un vblank (`stage` 3,3 + `pass` ~11 + lógica), así que se pasa del vblank en que tocaba el segundo, que ya no llega a mostrarse. Para que sirva hay que presentar el warp **mientras se calcula** el siguiente primer frame (otro hilo que envíe un snapshot de las listas en cada vblank), lo que pide una copia de las listas (~300 KB) y coordinar el acceso a la PowerVR.
+- Desplazamientos medidos en la demo de Londres: de 0 a ~12 px casi siempre, hasta 110 px en giros bruscos (de ahí el tope de 40).
+- Sin comprobar a ojo: Flycast visible no se mantuvo en primer plano para las capturas. No se corrige el paralaje por traslación de la cámara, y los objetos se mueven a 30 Hz (el warp no interpola enemigos ni Lara en el segundo frame).
+
+Versión asíncrona del warp (24/11/2026, `TRX_DC_ASMOFF2` bit 67108864)
+: dos hilos. El de render dibuja **un solo frame por tick** (sin esperar al
+vblank) y `DC_PVR_EndFrame` no envía a la PowerVR: copia las listas
+(`M_HandOver`, ~300 KB). Un hilo presentador (`trx-present`, prioridad por
+encima del de render, `dc_world.c`) envía en cada vblank el frame y, al
+siguiente, la copia con el mundo desplazado (desplazamiento calculado una vez
+por tick, `DC_Replay_WarpShift`). Pausa: `DC_World_Pause` espera al
+presentador y descarta lo pendiente. Antártida en Flycast oculto: 60 fps
+estables (30 construidos + 30 desplazados), sin bloqueos; el frame
+construido cuesta lo mismo (`pass` ~11 ms). No mide ganancia en Flycast
+(la Antártida ya iba a ~60); el interés está en la consola. Sin verificar a
+ojo, ni en consola; el log serie de Flycast sale truncado a menudo.
+
+Reparto de ticks y presupuesto: medida previa (24/11/2026, DC build 985+)
+: los picos que se veían en los logs de Flycast con `TRX_DC_LOG=1` son sobre
+todo del log serie (ver "Benchmark sin log" en PLAN_60_FIJO.md); sin log el
+peor tick de Londres es de ~37 ms. Medidor nuevo del warp asíncrono:
+`[present]` en el log y, en el informe del benchmark, "presented N, gaps over
+20 ms" (huecos entre frames enviados al PowerVR). TR3 Londres, demo 0, Native
+60, sin log, warp asíncrono: 59,3 fps presentados (5614 en 94,6 s), pero 11 %
+de huecos de más de 20 ms (628) y 4 de más de 40 ms: el ritmo es irregular
+(el frame llega según acaba la lógica + la construcción), no faltan frames.
+Sin warp, mismo disco: 58,8 fps, 3 frames de más de 35 ms. Siguiente paso
+posible: presentar el frame construido en un instante fijo del tick (colchón
+de ~8 ms de latencia) para igualar el ritmo.
+
+Warp con salas reproyectadas y objetos redibujados (24/11/2026)
+: el warp de desplazamiento uniforme hacía vibrar la imagen entera y a Lara
+(no corrige la traslación de lo cercano y los objetos iban a 30 Hz). Ahora el
+segundo frame de cada tick empieza con las **salas del primero**, cada vértice
+rotado con el giro de la cámara (reproyección por vértice, `M_WarpVertex`), y
+dibuja **de verdad** objetos, partículas e interfaz con la vista del tick
+(`M_DrawInstance` marca los tramos de salas con `DC_PVR_RoomBegin/End` y no
+dibuja salas en el segundo frame). Cola de tres huecos de listas entre el hilo
+de render y el presentador. TR3 Londres demo 0, Native 60, sin log: 59,8 fps,
+`pass` medio 5,2 ms (7,4 sin warp), 2 % de huecos de más de 20 ms (11 % con el
+warp de desplazamiento) y ninguno de más de 40 ms; 299 de 300 segundos frames
+toman las salas. No corrige la traslación de la cámara en las salas (paralaje
+de paredes cercanas). Sin verificar a ojo.
+
+Warp: descartado (24/11/2026)
+: tres variantes probadas por el usuario en Flycast y revertidas (código
+quitado, queda solo esta nota): (1) desplazamiento uniforme del segundo frame:
+vibraba toda la imagen y Lara; (2) salas del primer frame giradas por vértice
++ objetos redibujados: vibraban paredes, suelo y objetos cercanos a Lara al
+orbitar; (3) lo anterior con profundidad y traslación de cámara por vértice:
+"sigue funcionando raro". Además, con el IK activo la cola de Lara no seguía
+pegada al cambiar de posición las piernas (por comprobar si ya pasaba sin el
+warp). Medidas de las variantes (Londres, sin log): 59,3 a 59,8 fps, `pass`
+medio 5,2 ms frente a 7,4, huecos de más de 20 ms del 2 al 11 %. Lección: el
+segundo frame con listas ya proyectadas no es válido para lo que está cerca de
+la cámara (que en tercera persona es todo lo de Lara); lo medido sin vibración
+solo vale como cota de lo que se ahorraría.
