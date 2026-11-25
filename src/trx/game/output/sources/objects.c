@@ -1270,6 +1270,23 @@ void OutputSource_Objects_StageObjectMesh(const OBJECT_MESH *const mesh)
     M_Stage(mesh);
 }
 
+#if defined(__DREAMCAST__)
+void OutputSource_Objects_OcclAdd(
+    const int32_t mesh_idx, const MATRIX *const m, const int32_t left,
+    const int32_t top, const int32_t right, const int32_t bottom)
+{
+    const M_PRIV *const p = &m_Priv;
+    // Not built yet: it is once drawn, and paints from the next frame.
+    if (mesh_idx < 0 || mesh_idx >= (int32_t)p->mesh_count
+        || p->meshes[mesh_idx].mesh_batch == nullptr) {
+        return;
+    }
+    DC_MeshBatcher_OcclAddRoom(
+        p->batcher, p->meshes[mesh_idx].mesh_batch, m, left, top, right,
+        bottom);
+}
+#endif
+
 const SCENE_SOURCE *OutputSource_Objects_GetSource(void)
 {
     M_PRIV *const p = &m_Priv;

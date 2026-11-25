@@ -1038,21 +1038,26 @@ sb_stepd:
     bra     sb_step
     nop
 sb_chk:
-    cmp/pz  r9
+    ! the border ring is the next room's floor, not rock: passes
+    cmp/pl  r9
     bt      1f
     bra     sb_step
     nop
-1:  cmp/pz  r10
+1:  cmp/pl  r10
     bt      1f
     bra     sb_step
     nop
 1:  mov.l   @(0,r8),r1
-    cmp/ge  r1,r9
+    mov     r9,r3
+    add     #1,r3
+    cmp/ge  r1,r3                       ! ix + 1 >= size x
     bf      1f
     bra     sb_step
     nop
 1:  mov.l   @(4,r8),r2
-    cmp/ge  r2,r10
+    mov     r10,r3
+    add     #1,r3
+    cmp/ge  r2,r3                       ! iz + 1 >= size z
     bf      1f
     bra     sb_step
     nop
@@ -1134,7 +1139,12 @@ sb_chk:
     fmov.s  @(r0,r8),fr2
     fmul    fr2,fr1
     fadd    fr1,fr0                     ! lowest
-    mov     #12,r0
+    ! an eye under this floor looks up past it (from a room below): passes
+    fcmp/gt fr0,fr13                    ! eye y > lowest
+    bf      1f
+    bra     sb_step
+    nop
+1:  mov     #12,r0
     fmov.s  @(r0,r15),fr1
     fcmp/gt fr0,fr1                     ! y_in > lowest
     bt      1f

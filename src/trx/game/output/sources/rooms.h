@@ -16,4 +16,12 @@ void OutputSource_Rooms_StageRoom(const ROOM *room);
 bool OutputSource_Rooms_IsStaticMerged(int32_t draw_num);
 bool OutputSource_Rooms_RayBlocked(
     const ROOM *room, const XYZ_32 *eye, const XYZ_32 *to);
+// Paints the room's big opaque faces into the occlusion buffer (m: the
+// game's matrix with the room's position), those within its window.
+void OutputSource_Rooms_OcclAdd(
+    const ROOM *room, const MATRIX *m, int32_t left, int32_t top,
+    int32_t right, int32_t bottom);
+// TEMP: the same ray, logged.
+void OutputSource_Rooms_TraceRay(
+    const ROOM *room, const XYZ_32 *eye, const XYZ_32 *to);
 #endif

@@ -62,4 +62,7 @@ typedef struct {
     BOUNDS_16 bounds;
     XYZ_32 pos;
     XYZ_16 rot;
-} COLL_ITEM;
+// Aligned: its members are packed (alignment 1), and the assembly
+// (dc_bounds_collide) reads them as words, which a real SH4 faults on at an
+// address that is not a multiple of 4.
+} __attribute__((aligned(4))) COLL_ITEM;

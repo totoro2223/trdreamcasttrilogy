@@ -61,7 +61,11 @@ public static class FlycastKeys {
 '@
 Add-Type -AssemblyName System.Windows.Forms
 
-$proc = Get-Process flycast -ErrorAction Stop | Select-Object -First 1
+# With TRX_FLYCAST set, only that copy: never the user's own Flycast.
+$proc = Get-Process flycast -ErrorAction Stop |
+    Where-Object { -not $env:TRX_FLYCAST -or $_.Path -eq $env:TRX_FLYCAST } |
+    Select-Object -First 1
+if ($null -eq $proc) { throw "no Flycast at $env:TRX_FLYCAST" }
 $window = [IntPtr]::Zero
 for ($i = 0; $i -lt 40 -and $window -eq [IntPtr]::Zero; $i++) {
     $window = [FlycastKeys]::FindGame([uint32]$proc.Id)

@@ -2,10 +2,11 @@
 """Turns the sampling profiler's "[prof]" lines from the serial console into
 time per function.
 
-    prof_report.py SERIAL_LOG TRX.elf ADDR2LINE [BLOCKS] [pr]
+    prof_report.py SERIAL_LOG TRX.elf ADDR2LINE [BLOCKS] [pr|r]
 
 Sums the last BLOCKS dumps (default: all of them). With "pr", counts the
 return addresses instead: who called what waits or runs with interrupts off.
+With "r", the render thread's PCs (the native mode draws there).
 """
 
 import re
@@ -17,7 +18,9 @@ from collections import defaultdict
 def main() -> None:
     log, elf, addr2line = sys.argv[1:4]
     want = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-    tag = r"\[prof\] pr" if sys.argv[5:6] == ["pr"] else r"\[prof\]"
+    # "pr": the callers; "r": the render thread's PC.
+    mode = sys.argv[5] if len(sys.argv) > 5 else ""
+    tag = r"\[prof\] " + mode if mode in ("pr", "r") else r"\[prof\]"
     text = open(log, encoding="utf-8", errors="replace").read()
     blocks = re.findall(r"\[prof\] begin.*?\[prof\] end", text, re.S)
     if want > 0:

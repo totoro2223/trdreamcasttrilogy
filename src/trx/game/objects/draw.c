@@ -20,6 +20,7 @@
 #if defined(__DREAMCAST__)
     #include <platform/dreamcast/dc_mode.h>
     #include <platform/dreamcast/dc_probe.h>
+    #include <platform/dreamcast/dc_ragdoll.h>
     #include <platform/dreamcast/render/shadow.h>
     #include <trx/game/output/sources/objects.h>
 #else
@@ -131,6 +132,9 @@ static CLIP M_GetClip(const OBJECT *const obj, const BOUNDS_16 *const bounds)
 // Only an item of the world is drawn as a rig, not the inventory's or the
 // interface's objects (another projection, lit their own way).
 static bool m_RigItem = false;
+// A ragdoll's pose, drawn in place of the item's frames.
+static const ANIM_POSE *m_RagdollPose = nullptr;
+static const BOUNDS_16 *m_RagdollBounds = nullptr;
 #endif
 
 static bool M_DrawInterpolatedObject(
@@ -144,6 +148,11 @@ static bool M_DrawInterpolatedObject(
     }
     ASSERT(frame1 != nullptr);
     BOUNDS_16 bounds = frame1->bounds;
+#if defined(__DREAMCAST__)
+    if (m_RagdollPose != nullptr) {
+        bounds = *m_RagdollBounds;
+    }
+#endif
     if (skips_frame_offset) {
         const XYZ_16 offset = frame1->offset;
         bounds.min.x -= offset.x;
@@ -207,8 +216,16 @@ static bool M_DrawInterpolatedObject(
         &walk,
         &(ANIM_WALK_DESC) {
             .obj = obj,
+#if defined(__DREAMCAST__)
+            .pose = m_RagdollPose != nullptr
+                ? *m_RagdollPose
+                : Anim_Pose_FromFrames(pose_a, frame2, pose_f, rate),
+            .extra_rotations = m_RagdollPose != nullptr ? nullptr
+                                                        : extra_rotation,
+#else
             .pose = Anim_Pose_FromFrames(pose_a, frame2, pose_f, rate),
             .extra_rotations = extra_rotation,
+#endif
             .applies_base_rot = true,
             .skips_frame_offset = skips_frame_offset,
         });
@@ -332,7 +349,12 @@ bool Object_DrawAnimatingItemWithSwap(
     int32_t rate;
     const int32_t frac = Item_GetFrames(item, frames, &rate);
     const OBJECT *const obj = Object_Get(item->object_id);
-    const BOUNDS_16 *const bounds = Item_GetBoundsAccurate(item);
+    const BOUNDS_16 *bounds = Item_GetBoundsAccurate(item);
+#if defined(__DREAMCAST__)
+    ANIM_POSE ragdoll_pose;
+    const bool ragdoll = obj->intelligent
+        && DC_Ragdoll_GetPose(item, &ragdoll_pose, &bounds);
+#endif
 #if defined(__DREAMCAST__)
     // TEST (TRX_DC_ASMOFF2 bit 33554432): the enemies are not drawn, to tell
     // what they cost from what drawing them does.
@@ -381,12 +403,15 @@ bool Object_DrawAnimatingItemWithSwap(
 
 #if defined(__DREAMCAST__)
     m_RigItem = true;
+    m_RagdollPose = ragdoll ? &ragdoll_pose : nullptr;
+    m_RagdollBounds = bounds;
 #endif
     bool result = Object_DrawInterpolatedObjectWithSwap(
         obj, mesh_mask, extra_rotation, frames[0], frames[1], frac, rate,
         swap_obj);
 #if defined(__DREAMCAST__)
     m_RigItem = false;
+    m_RagdollPose = nullptr;
 #endif
     if (g_Config.debug.enable_debug_bounding_boxes) {
         const BOUNDS_32 debug_bounds = BOUNDS_32_From16(bounds);

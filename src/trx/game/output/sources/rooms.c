@@ -497,6 +497,23 @@ bool OutputSource_Rooms_RayBlocked(
     return DC_MeshBatcher_RayBlocked(
         p->batcher, p->meshes[Room_GetIndex(room)], room, eye, to);
 }
+
+void OutputSource_Rooms_OcclAdd(
+    const ROOM *const room, const MATRIX *const m, const int32_t left,
+    const int32_t top, const int32_t right, const int32_t bottom)
+{
+    const M_PRIV *const p = &m_Priv;
+    DC_MeshBatcher_OcclAddRoom(
+        p->batcher, p->meshes[Room_GetIndex(room)], m, left, top, right, bottom);
+}
+
+void OutputSource_Rooms_TraceRay(
+    const ROOM *const room, const XYZ_32 *const eye, const XYZ_32 *const to)
+{
+    const M_PRIV *const p = &m_Priv;
+    DC_MeshBatcher_TraceRay(
+        p->batcher, p->meshes[Room_GetIndex(room)], room, eye, to);
+}
 #endif
 
 void OutputSource_Rooms_StageRoom(const ROOM *const room)

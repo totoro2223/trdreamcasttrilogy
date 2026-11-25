@@ -64,6 +64,13 @@ static const size_t m_ListStart[] = {
 // A margin over the peak, and how much of it the peak keeps a frame (it
 // halves in about 140 frames).
 #define M_PEAK_MARGIN 1.25f
+// The end of the pool no list is given at the start of a frame: a list that
+// outgrows its share (a new room, a turn of the camera: the shares follow the
+// frames before) goes on there instead of dropping polygons, as many as 24000
+// in the TR3 benchmark with the pool three quarters empty. Pieces of at least
+// M_SPILL_PIECE.
+#define M_SPILL_BYTES (64 * 1024)
+#define M_SPILL_PIECE (16 * 1024)
 #define M_PEAK_DECAY 0.995f
 #define M_LIST_COUNT 4
 // How much of the colour a shadowed pixel keeps.
@@ -98,6 +105,15 @@ typedef struct {
     // What did not fit this frame, and the most the list has asked for.
     size_t frame_dropped;
     float peak;
+    // A list that fills up during a frame goes on in pieces of the spill
+    // (M_Spill): the pieces it closed, sent before buffer in that order, and
+    // their bytes.
+    struct {
+        const void *buffer;
+        size_t bytes;
+    } seg[8];
+    int32_t seg_count;
+    size_t seg_bytes;
     bool has_state;
     DC_BLEND blend;
     int32_t page;
@@ -107,6 +123,12 @@ typedef struct {
     bool shadow;
     bool fog; // the table's fog (M_FogTableOn)
 } M_LIST;
+
+// What a list holds this frame, in all its pieces.
+static inline size_t M_Used(const M_LIST *const list)
+{
+    return list->seg_bytes + list->frame_written;
+}
 
 static bool m_Initialised = false;
 static M_LIST m_Lists[M_LIST_COUNT] = {
@@ -256,7 +278,7 @@ static struct {
     // The texels' FNV-1a hash (M_HashPage) as stored, ARGB1555 pages only: how
     // the disc's files key a page.
     bool hashed[M_MAX_TEXTURE_PAGES];
-    // A VQ page that has its mipmaps.
+    // A page that has its mipmaps (VQ, or twiddled with M_LoadRawMips).
     bool mip[M_MAX_TEXTURE_PAGES];
     uint32_t hash[M_MAX_TEXTURE_PAGES];
 } m_Pages = {};
@@ -299,6 +321,20 @@ static size_t m_PoolBytes = 0;
 // What the pool holds now: less than m_PoolBytes when memory was short.
 static size_t m_PoolHave = 0;
 static bool m_PoolSqueezed = false;
+static uint8_t *m_Spill = nullptr;
+static size_t m_SpillLeft = 0;
+// The relief (DC_BLEND_BUMP, DC_BLEND_BUMP_GLOW) draws over faces already
+// there and comes before the translucent faces of the rooms after it: it
+// takes no spill and leaves this much of its list for what follows. Left out
+// when it does not fit, a face goes without its relief that frame instead of
+// a room without its windows and water (TR3 benchmark: the relief had filled
+// the translucent list).
+#define M_RELIEF_HEADROOM (32 * 1024)
+
+static bool M_IsRelief(void)
+{
+    return m_Blend == DC_BLEND_BUMP || m_Blend == DC_BLEND_BUMP_GLOW;
+}
 
 // Cuts the pool up for the frame about to start, by the peaks of what each
 // list has asked for.
@@ -341,6 +377,12 @@ static void M_Repartition(void)
         }
         return;
     }
+    // Not with a pool that came back small (DC_PVR_ReleaseVertexPool): the
+    // lists' minimums come first.
+    const size_t spill = m_PoolHave >= 256 * 1024 ? M_SPILL_BYTES : 0;
+    const size_t pool = m_PoolHave - spill;
+    m_Spill = m_Pool + pool;
+    m_SpillLeft = spill;
     size_t want[M_LIST_COUNT];
     size_t wanted = 0;
     size_t mins = 0;
@@ -355,22 +397,22 @@ static void M_Repartition(void)
     size_t given[M_LIST_COUNT];
     size_t used = 0;
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
-        if (wanted <= m_PoolHave) {
+        if (wanted <= pool) {
             // Room over: shared out in proportion to what was asked.
             given[i] = want[i]
-                + (size_t)((double)(m_PoolHave - wanted) * want[i] / wanted);
+                + (size_t)((double)(pool - wanted) * want[i] / wanted);
         } else {
             // Short: each keeps its minimum and takes its share of the rest.
             const double extra = (double)(want[i] - m_ListMin[i]);
             const double extra_total = (double)(wanted - mins);
             given[i] = m_ListMin[i]
-                + (size_t)((double)(m_PoolHave - mins) * extra / extra_total);
+                + (size_t)((double)(pool - mins) * extra / extra_total);
         }
         given[i] &= ~(size_t)31;
         used += given[i];
     }
     // What the rounding left goes to the opaque list, which holds Lara.
-    given[0] += (m_PoolHave - used) & ~(size_t)31;
+    given[0] += (pool - used) & ~(size_t)31;
     size_t at = 0;
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
         m_Lists[i].buffer = m_Pool + at;
@@ -389,7 +431,10 @@ void DC_PVR_ReleaseVertexPool(void)
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
         m_Lists[i].frame_capacity = 0;
         m_Lists[i].frame_written = 0;
+        m_Lists[i].seg_count = 0;
+        m_Lists[i].seg_bytes = 0;
     }
+    m_SpillLeft = 0;
 }
 
 // The Lua bytecode, put in video memory right after the PowerVR comes up so
@@ -1305,8 +1350,9 @@ static pvr_ptr_t M_LoadVQ(const uint32_t hash, bool *const mip)
     if (pos == -1) {
         return nullptr;
     }
-    // Bit 31: a page with see-through texels, whose mipmaps stay on the disc
-    // (texvq.c): video memory takes its codebook and its own indices alone.
+    // Bit 31 (discs made before 25/11/2026): a page with see-through texels,
+    // whose mipmaps stay on the disc: video memory takes its codebook and its
+    // own indices alone.
     const bool use_mip = m_VQ.mip && (pos & 0x80000000) == 0
         && g_Config.rendering.dc_mipmaps;
     pos &= 0x7FFFFFFF;
@@ -1333,6 +1379,99 @@ static pvr_ptr_t M_LoadVQ(const uint32_t hash, bool *const mip)
     }
     *mip = use_mip;
     return ptr;
+}
+
+// A twiddled page with its levels: 6 bytes, then the levels from 1x1 up to
+// 128x128, each twiddled (the 1x1 at 6, the 2x2 at 8, the 4x4 at 16, ...),
+// then the page itself at this offset.
+#define M_RAW_MIP_BYTES 0xAAB0
+
+// Half of a level of size x size (linear) into dst, which may be src. A
+// see-through texel's colour is whatever the artist left (black): only the
+// solid ones give theirs to the average, and the texel is solid when most of
+// its four are.
+static void M_HalveLevel(
+    uint16_t *const dst, const uint16_t *const src, const int32_t size,
+    const bool argb4444)
+{
+    const int32_t half = size / 2;
+    for (int32_t y = 0; y < half; y++) {
+        for (int32_t x = 0; x < half; x++) {
+            const uint16_t t[4] = {
+                src[2 * y * size + 2 * x],
+                src[2 * y * size + 2 * x + 1],
+                src[(2 * y + 1) * size + 2 * x],
+                src[(2 * y + 1) * size + 2 * x + 1],
+            };
+            uint16_t out;
+            if (argb4444) {
+                uint32_t sum[4] = {};
+                for (int32_t k = 0; k < 4; k++) {
+                    for (int32_t c = 0; c < 4; c++) {
+                        sum[c] += (t[k] >> (c * 4)) & 0xF;
+                    }
+                }
+                out = 0;
+                for (int32_t c = 0; c < 4; c++) {
+                    out |= (uint16_t)(((sum[c] + 2) / 4) << (c * 4));
+                }
+            } else {
+                int32_t solid = 0;
+                for (int32_t k = 0; k < 4; k++) {
+                    solid += t[k] >> 15;
+                }
+                uint32_t r = 0, g = 0, b = 0, n = 0;
+                for (int32_t k = 0; k < 4; k++) {
+                    if (solid == 0 || (t[k] >> 15) != 0) {
+                        r += (t[k] >> 10) & 0x1F;
+                        g += (t[k] >> 5) & 0x1F;
+                        b += t[k] & 0x1F;
+                        n++;
+                    }
+                }
+                out = (uint16_t)((solid >= 2 ? 0x8000 : 0)
+                                 | (((r + n / 2) / n) << 10)
+                                 | (((g + n / 2) / n) << 5) | ((b + n / 2) / n));
+            }
+            dst[y * half + x] = out;
+        }
+    }
+}
+
+// The levels below a twiddled page (its first M_RAW_MIP_BYTES), made from its
+// texels; false if there was no room to make them.
+static bool M_LoadRawMips(
+    const pvr_ptr_t ptr, const uint16_t *const texels, const bool argb4444)
+{
+    enum { M_SIZE = TEXTURE_PAGE_WIDTH / 2 };
+    uint16_t *const level = malloc(M_SIZE * M_SIZE * sizeof(uint16_t));
+    uint16_t *const twiddled = malloc(M_SIZE * M_SIZE * sizeof(uint16_t));
+    if (level == nullptr || twiddled == nullptr) {
+        free(level);
+        free(twiddled);
+        return false;
+    }
+    uint16_t head[8] = {}; // 6 bytes, the 1x1 and the 2x2
+    const uint16_t *src = texels;
+    for (int32_t size = M_SIZE; size >= 1; size /= 2) {
+        M_HalveLevel(level, src, size * 2, argb4444);
+        src = level;
+        uint16_t *const out = size >= 4 ? twiddled : &head[size == 2 ? 4 : 3];
+        for (int32_t y = 0; y < size; y++) {
+            for (int32_t x = 0; x < size; x++) {
+                out[M_Twiddle(x, y)] = level[y * size + x];
+            }
+        }
+        if (size >= 4) {
+            M_WriteTexels(
+                (uint16_t *)((uint8_t *)ptr + 6 + 2 * ((size * size - 1) / 3)),
+                twiddled, size * size);
+        }
+    }
+    M_WriteTexels((uint16_t *)ptr, head, 8);
+    free(level);
+    free(twiddled);
+    return true;
 }
 
 void DC_PVR_StoreTexturePage(
@@ -1362,16 +1501,25 @@ void DC_PVR_StoreTexturePage(
     if (m_Pages.vq[page]) {
         return;
     }
-    // Twiddled, as textures sample faster.
-    m_Pages.ptr[page] = pvr_mem_malloc(TEXTURE_PAGE_SIZE * sizeof(uint16_t));
+    // Twiddled, as textures sample faster; with its levels before it.
+    const bool mip = g_Config.rendering.dc_mipmaps;
+    const size_t skip = mip ? M_RAW_MIP_BYTES : 0;
+    m_Pages.ptr[page] =
+        pvr_mem_malloc(skip + TEXTURE_PAGE_SIZE * sizeof(uint16_t));
     if (m_Pages.ptr[page] == nullptr) {
         LOG_ERROR(
             "No video memory for texture page %d (%u KiB free)", page,
             (unsigned)(pvr_mem_available() / 1024));
         return;
     }
+    m_Pages.mip[page] = mip
+        && M_LoadRawMips(
+            m_Pages.ptr[page], texels, format == TEXTURE_PAGE_ARGB4444);
+    // (Without its levels, for want of RAM, the page sits at the start.)
     pvr_txr_load_ex(
-        (void *)texels, m_Pages.ptr[page], TEXTURE_PAGE_WIDTH,
+        (void *)texels,
+        (uint8_t *)m_Pages.ptr[page] + (m_Pages.mip[page] ? skip : 0),
+        TEXTURE_PAGE_WIDTH,
         TEXTURE_PAGE_HEIGHT, PVR_TXRLOAD_16BPP);
 }
 
@@ -1541,10 +1689,13 @@ void DC_PVR_CommitTexturePages(void)
     m_Pages.committed = true;
     m_HeaderGen++;
     char formats_text[M_MAX_TEXTURE_PAGES + 1] = {};
+    // VQ: m (with mipmaps) or v; twiddled ARGB1555: r (with mipmaps) or 1;
+    // ARGB4444: q (with mipmaps) or 4.
     for (int32_t i = 0; i < m_Pages.count; i++) {
-        formats_text[i] = m_Pages.vq[i]
-            ? (m_Pages.mip[i] ? 'm' : 'v')
-            : (m_Pages.format[i] == TEXTURE_PAGE_ARGB4444 ? '4' : '1');
+        const bool argb4444 = m_Pages.format[i] == TEXTURE_PAGE_ARGB4444;
+        formats_text[i] = m_Pages.vq[i] ? (m_Pages.mip[i] ? 'm' : 'v')
+            : m_Pages.mip[i]            ? (argb4444 ? 'q' : 'r')
+                                        : (argb4444 ? '4' : '1');
     }
     LOG_INFO(
         "%d texture pages ready (%s), %u KiB of video memory free",
@@ -1599,6 +1750,8 @@ static void M_ResetFrame(void)
         m_Lists[i].frame_written = 0;
         m_Lists[i].frame_dropped = 0;
         m_Lists[i].has_state = false;
+        m_Lists[i].seg_count = 0;
+        m_Lists[i].seg_bytes = 0;
     }
     m_Depth.floor = 0.0f;
     m_Depth.top = 0.0f;
@@ -1766,7 +1919,7 @@ void DC_PVR_EndFrame(void)
     // What each list asked for, to cut the pool by the next frame.
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
         const float demand =
-            (float)(m_Lists[i].frame_written + m_Lists[i].frame_dropped);
+            (float)(M_Used(&m_Lists[i]) + m_Lists[i].frame_dropped);
         const float kept = m_Lists[i].peak * M_PEAK_DECAY;
         m_Lists[i].peak = demand > kept ? demand : kept;
     }
@@ -1779,11 +1932,17 @@ void DC_PVR_EndFrame(void)
     // Each list once, as the tile accelerator wants; KOS sends a blank one
     // for those left empty.
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
-        if (m_Lists[i].frame_written == 0) {
+        const M_LIST *const list = &m_Lists[i];
+        if (M_Used(list) == 0) {
             continue;
         }
-        pvr_list_begin(m_Lists[i].list);
-        pvr_prim(m_Lists[i].buffer, m_Lists[i].frame_written);
+        pvr_list_begin(list->list);
+        for (int32_t k = 0; k < list->seg_count; k++) {
+            pvr_prim((void *)list->seg[k].buffer, list->seg[k].bytes);
+        }
+        if (list->frame_written > 0) {
+            pvr_prim(list->buffer, list->frame_written);
+        }
         pvr_list_finish();
     }
     pvr_scene_finish();
@@ -1792,10 +1951,13 @@ void DC_PVR_EndFrame(void)
     if (m_Dropped > 0) {
         LOG_WARNING(
             "%d polygons did not fit the vertex buffers this frame "
-            "(OP %uK TR %uK PT %uK used)",
-            m_Dropped, (unsigned)(m_Lists[0].frame_written / 1024),
-            (unsigned)(m_Lists[1].frame_written / 1024),
-            (unsigned)(m_Lists[2].frame_written / 1024));
+            "(OP %uK TR %uK PT %uK used; left out OP %uK TR %uK PT %uK)",
+            m_Dropped, (unsigned)(M_Used(&m_Lists[0]) / 1024),
+            (unsigned)(M_Used(&m_Lists[1]) / 1024),
+            (unsigned)(M_Used(&m_Lists[2]) / 1024),
+            (unsigned)(m_Lists[0].frame_dropped / 1024),
+            (unsigned)(m_Lists[1].frame_dropped / 1024),
+            (unsigned)(m_Lists[2].frame_dropped / 1024));
     }
 }
 
@@ -1902,8 +2064,7 @@ static bool m_Trilinear = false;
 
 bool DC_PVR_HasMipmaps(const int32_t page)
 {
-    return page >= 0 && page < m_Pages.count && m_Pages.mip[page]
-        && m_Pages.vq[page];
+    return page >= 0 && page < m_Pages.count && m_Pages.mip[page];
 }
 
 void DC_PVR_SetTrilinear(const bool on)
@@ -1932,15 +2093,16 @@ static const uint16_t *M_PageBlock(const int32_t page, const int32_t i)
 {
     const uint16_t *const texels = (const uint16_t *)m_Pages.ptr[page];
     if (!m_Pages.vq[page]) {
-        return &texels[i * 4];
+        return &texels[(m_Pages.mip[page] ? M_RAW_MIP_BYTES / 2 : 0) + i * 4];
     }
-    // The block's byte, read with the word it is in: past the codebook, and
-    // past the smaller levels on a page with mipmaps.
-    const volatile uint32_t *const words =
-        (const volatile uint32_t *)((const uint8_t *)texels + M_VQ_BOOK_BYTES
-                                    + (m_Pages.mip[page] ? M_VQ_MIP_INDICES
-                                                         : 0));
-    return &texels[((words[i >> 2] >> ((i & 3) * 8)) & 0xFF) * 4];
+    // The block's byte, read with the half word it is in (video memory takes
+    // no byte reads): past the codebook, and past the smaller levels on a
+    // page with mipmaps, which leave it only 2-aligned (a word read there is
+    // an address error).
+    const int32_t at = M_VQ_BOOK_BYTES
+        + (m_Pages.mip[page] ? M_VQ_MIP_INDICES : 0) + i;
+    const uint16_t pair = ((const volatile uint16_t *)texels)[at >> 1];
+    return &texels[((pair >> ((at & 1) * 8)) & 0xFF) * 4];
 }
 
 bool DC_PVR_HasTransparency(
@@ -2355,8 +2517,7 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
         const pvr_ptr_t half = M_CurrentHalfPage();
         // Trilinear: the first pass on the opaque faces, the second blended
         // over them, on a page with its levels.
-        const bool tri = m_Trilinear && m_Pages.mip[m_Page]
-            && m_Pages.vq[m_Page] && half == nullptr
+        const bool tri = m_Trilinear && m_Pages.mip[m_Page] && half == nullptr
             && (m_Blend == DC_BLEND_OPAQUE || m_Blend == DC_BLEND_TRILINEAR);
         tri_off = m_Blend == DC_BLEND_TRILINEAR && !tri;
         const int32_t format =
@@ -2381,8 +2542,7 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
         // A page loaded with its levels is always read as one, whatever the
         // filter (else the chip takes the levels for the page). Bilinear or
         // point within a level: trilinear would send each polygon twice.
-        cxt.txr.mipmap = m_Pages.mip[m_Page] && m_Pages.vq[m_Page]
-            && half == nullptr;        // The texture's own alpha is what cuts the colour key out and fades
+        cxt.txr.mipmap = m_Pages.mip[m_Page] && half == nullptr;        // The texture's own alpha is what cuts the colour key out and fades
         // soft edges; the opaque list has no use for it. (The field is true
         // to disable.)
         cxt.txr.alpha = m_Blend == DC_BLEND_OPAQUE;
@@ -2489,6 +2649,35 @@ static inline void *M_Tail(const M_LIST *const list)
     return (uint8_t *)list->buffer + list->frame_written;
 }
 
+// Moves a list that has no room for needed bytes on to a piece of the spill:
+// false when the spill has none left. The stream the PowerVR gets is the same,
+// the pieces sent one after the other.
+static bool M_Spill(M_LIST *const list, const size_t needed)
+{
+    const int32_t max_segs =
+        (int32_t)(sizeof(list->seg) / sizeof(list->seg[0]));
+    size_t piece = needed > M_SPILL_PIECE ? needed : M_SPILL_PIECE;
+    piece = (piece + 31) & ~(size_t)31;
+    if (piece > m_SpillLeft) {
+        piece = m_SpillLeft & ~(size_t)31;
+    }
+    if (list->seg_count >= max_segs || piece < needed) {
+        return false;
+    }
+    if (list->frame_written > 0) {
+        list->seg[list->seg_count].buffer = list->buffer;
+        list->seg[list->seg_count].bytes = list->frame_written;
+        list->seg_count++;
+        list->seg_bytes += list->frame_written;
+    }
+    list->buffer = m_Spill;
+    list->frame_capacity = piece;
+    list->frame_written = 0;
+    m_Spill += piece;
+    m_SpillLeft -= piece;
+    return true;
+}
+
 // Whether the list already holds the state now set: nothing set since it last
 // took it, which is most polygons, or what was set is what it has.
 static bool M_SameState(const M_LIST *const list)
@@ -2517,6 +2706,16 @@ static void M_PutHeader(M_LIST *const list)
     list->fog = M_FogTableOn();
 }
 
+size_t DC_PVR_ReliefRoom(void)
+{
+    if (!m_InFrame || m_Current == nullptr) {
+        return 0;
+    }
+    const M_LIST *const list = m_Current;
+    const size_t used = list->frame_written + M_RELIEF_HEADROOM;
+    return used < list->frame_capacity ? list->frame_capacity - used : 0;
+}
+
 static void *M_Reserve(const size_t size)
 {
     if (!m_InFrame || m_Current == nullptr) {
@@ -2525,7 +2724,13 @@ static void *M_Reserve(const size_t size)
     M_LIST *const list = m_Current;
     const bool same_state = M_SameState(list);
     const size_t needed = size + (same_state ? 0 : sizeof(pvr_poly_hdr_t));
-    if (list->frame_written + needed > list->frame_capacity) {
+    if (M_IsRelief()) {
+        if (DC_PVR_ReliefRoom() < needed) {
+            return nullptr;
+        }
+    } else if (
+        list->frame_written + needed > list->frame_capacity
+        && !M_Spill(list, needed)) {
         m_Dropped++;
         list->frame_dropped += needed;
         return nullptr;
@@ -2542,10 +2747,13 @@ uint8_t *DC_PVR_BeginRun(size_t *const space, bool *const header)
     if (!m_InFrame || m_Current == nullptr) {
         return nullptr;
     }
-    const M_LIST *const list = m_Current;
+    M_LIST *const list = m_Current;
     *header = !M_SameState(list);
-    const size_t used =
-        list->frame_written + (*header ? sizeof(pvr_poly_hdr_t) : 0);
+    size_t used = list->frame_written + (*header ? sizeof(pvr_poly_hdr_t) : 0);
+    // A run takes what room there is: with little left, a piece of the spill.
+    if (used + 4096 > list->frame_capacity && M_Spill(list, M_SPILL_PIECE)) {
+        used = *header ? sizeof(pvr_poly_hdr_t) : 0;
+    }
     if (used >= list->frame_capacity) {
         // A run that finds the list full: more than it holds is coming.
         m_Current->frame_dropped += 4096;
@@ -2577,7 +2785,8 @@ void DC_PVR_ShadowVolume(const DC_PVR_TRIANGLE *const tris, const int32_t count)
     M_LIST *const list = m_ModList;
     const size_t needed =
         2 * sizeof(pvr_mod_hdr_t) + count * sizeof(pvr_modifier_vol_t);
-    if (list->frame_written + needed > list->frame_capacity) {
+    if (list->frame_written + needed > list->frame_capacity
+        && !M_Spill(list, needed)) {
         m_Dropped += count;
         list->frame_dropped += needed;
         return;
@@ -2635,7 +2844,15 @@ static inline void M_Fill(
 
 pvr_vertex_t *DC_PVR_ReservePoly(const int32_t count)
 {
-    return M_Reserve(count * sizeof(pvr_vertex_t));
+    pvr_vertex_t *const out = M_Reserve(count * sizeof(pvr_vertex_t));
+    // Every caller writes each vertex whole: its cache line is taken without
+    // being read from RAM first (movca.l), which every store had missed.
+    if (out != nullptr && ((uintptr_t)out & 31) == 0) {
+        for (int32_t k = 0; k < count; k++) {
+            __asm__ volatile("movca.l %1,@%0" : : "r"(&out[k]), "z"(0u) : "memory");
+        }
+    }
+    return out;
 }
 
 void DC_PVR_CommitPoly(const int32_t count)
@@ -2701,7 +2918,7 @@ void DC_PVR_GetFrameStats(DC_PVR_FRAME_STATS *const out)
 {
     out->polygons = m_Submitted;
     for (int32_t i = 0; i < M_LIST_COUNT; i++) {
-        out->list_bytes[i] = (uint32_t)m_Lists[i].frame_written;
+        out->list_bytes[i] = (uint32_t)M_Used(&m_Lists[i]);
     }
     out->wait_us = m_WaitUs;
     out->map_wait_us = m_MapWaitUs;

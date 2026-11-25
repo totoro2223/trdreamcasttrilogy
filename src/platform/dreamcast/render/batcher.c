@@ -1,4 +1,4 @@
-﻿// Dreamcast mesh batcher: the MESH_BATCHER of trx/game/output/mesh_batcher
+// Dreamcast mesh batcher: the MESH_BATCHER of trx/game/output/mesh_batcher
 // drawn through the PowerVR.
 //
 // The sources build their meshes and stage instances exactly as on the
@@ -40,6 +40,7 @@
 #include <trx/game/output/textures.h>
 #include <trx/game/output/utils.h>
 #include <trx/game/rooms/common.h>
+#include <trx/game/rooms/draw.h>
 #include <trx/game/output/vertex_range.h>
 #include <trx/game/viewport.h>
 #include <trx/version.h>
@@ -238,6 +239,14 @@ typedef struct M_BINDING {
     // Per sector: the highest point of the faces standing on it (room space,
     // y down), where a wall there stops hiding what is above it.
     float *wall_top;
+    // The mesh's big opaque triangles, what it paints into the occlusion
+    // buffer (DC_MeshBatcher_OcclAddRoom): their corners (3 a triangle) in
+    // occ_pos, each vertex once, so that each is transformed once.
+    uint16_t *occ_tris;
+    float (*occ_pos)[3];
+    int32_t occ_count;
+    int32_t occ_vertex_count;
+    bool occ_built;
     int32_t see_width;
     int32_t see_depth;
     int32_t always_start;
@@ -320,6 +329,12 @@ static bool m_DebugRooms = false;
 // TEMP: R + d-pad up turns the occlusion (rays, chunks, rooms, objects) off and
 // on, to see a view with and without it.
 bool g_DC_NoOcclusion = false;
+// TEMP: L + d-pad up leaves out the next room of the draw list (-1: none),
+// to see which rooms show at all (rooms/draw.c).
+int32_t g_DC_SkipRoom = -1;
+// TEMP: the next frame logs every portal the occlusion tries (rooms/draw.c);
+// set by L + up as it moves the skip on.
+bool g_DC_DumpOcclusion = false;
 // Rooms transformed this frame: there is a level in view to switch it on for.
 static int32_t m_DebugFrameRooms = 0;
 // Per chunk of the room just culled: 0 outside the view, 1 drawn, 2 hidden by
@@ -523,7 +538,13 @@ _Static_assert(
 // The least of the colour a slope turned from the light keeps (M_BumpAt).
 #define M_BUMP_FLOOR 0.45f
 // How bright the slopes turned to the light shine, of the whole.
-#define M_BUMP_GLOW 0.5f
+#define M_BUMP_GLOW 0.8f
+// Of the shine's spot, what a flat texel takes; the slopes turned to the
+// light take up to the whole (M_BumpAt).
+#define M_BUMP_SHINE_FLAT 0.2f
+// The shine shows the relief whole nearer than this and none from this far.
+#define M_BUMP_SHINE_DETAIL_NEAR (1.0f * WALL_L)
+#define M_BUMP_SHINE_DETAIL_FAR (2.0f * WALL_L)
 // The shine reaches less far than the shade (it costs a second pass of
 // the same faces, and is the part that cannot be kept from one frame to the
 // next): it fades out over its own, shorter stretch.
@@ -948,13 +969,18 @@ M_HOT uint32_t M_PackARGB(
 static inline uint32_t M_LerpARGB(
     const uint32_t c0, const uint32_t c1, const int32_t t)
 {
-    uint32_t result = 0;
-    for (int32_t shift = 0; shift < 32; shift += 8) {
-        const int32_t a = (int32_t)((c0 >> shift) & 0xFF);
-        const int32_t b = (int32_t)((c1 >> shift) & 0xFF);
-        result |= (uint32_t)(a + (((b - a) * t + 128) >> 8)) << shift;
+    if (c0 == c1) {
+        return c0;
     }
-    return result;
+    // Two channels per multiply, 16 bits each: a lane's 256a + (b-a)t + 128
+    // lies in 0..65535, so the borrows of the packed difference cancel out and
+    // each lane comes out as a + floor(((b-a)t + 128) / 256), as one at a time.
+    const uint32_t m = 0x00FF00FFu;
+    const uint32_t lo0 = c0 & m;
+    const uint32_t hi0 = (c0 >> 8) & m;
+    const uint32_t lo = ((lo0 << 8) + ((c1 & m) - lo0) * (uint32_t)t + 0x00800080u) >> 8;
+    const uint32_t hi = ((hi0 << 8) + (((c1 >> 8) & m) - hi0) * (uint32_t)t + 0x00800080u) >> 8;
+    return (lo & m) | ((hi & m) << 8);
 }
 
 static M_BINDING *M_GetBinding(
@@ -3798,10 +3824,14 @@ static bool M_SphereShows(
 // Whether a wall of the room's grid may hide what lies behind it (the
 // chunks' occlusion, TRX_DC_OCCLUDE).
 #ifndef TRX_DC_OCCLUDE
-    // Off for now (rays that hide rooms, chunks and objects): the old
-    // default is kept here, build with -DTRX_DC_OCCLUDE=1 to bring it back.
-    // #define TRX_DC_OCCLUDE 1
-    #define TRX_DC_OCCLUDE 0
+    // Off: in TR1 Cistern it hid no polygon (same count on and off, DC
+    // build 1480) yet cost 0.2-0.6 ms and still left holes. 1 turns it on;
+    // the boxes build has it, to see what it hides.
+    #if defined(TRX_DC_BOXES)
+        #define TRX_DC_OCCLUDE 1
+    #else
+        #define TRX_DC_OCCLUDE 0
+    #endif
 #endif
 // How thin a face standing in a wall is, and how far it reaches into the
 // sectors on its sides.
@@ -3816,6 +3846,8 @@ static bool M_SphereShows(
 // Marks the sectors that a face you can see through (a punch-through one, a
 // translucent or an added one) lies on or beside, one more each way as a face
 // on a wall lies on the border between the wall and the open sector.
+// The faces' indices name corners: once a room is baked (vref) a corner's
+// vertex is not the one of the same number (M_Corner).
 static void M_MarkSeeThrough(
     M_BINDING *const bind, const OUTPUT_MESH_INDEX *const indices,
     const int32_t count, const OUTPUT_MESH_VERTEX *const vertices)
@@ -3826,7 +3858,7 @@ static void M_MarkSeeThrough(
         float lo_z = FLT_MAX;
         float hi_z = -FLT_MAX;
         for (int32_t j = 0; j < 3; j++) {
-            const OUTPUT_MESH_VERTEX *const v = &vertices[indices[i + j]];
+            const OUTPUT_MESH_VERTEX *const v = M_Corner(bind, vertices, indices[i + j]);
             lo_x = MIN(lo_x, v->pos.x);
             hi_x = MAX(hi_x, v->pos.x);
             lo_z = MIN(lo_z, v->pos.z);
@@ -3867,7 +3899,7 @@ static void M_MarkWallTops(
         float hi_z = -FLT_MAX;
         float top = FLT_MAX;
         for (int32_t j = 0; j < 3; j++) {
-            const OUTPUT_MESH_VERTEX *const v = &vertices[indices[i + j]];
+            const OUTPUT_MESH_VERTEX *const v = M_Corner(bind, vertices, indices[i + j]);
             lo_x = MIN(lo_x, v->pos.x);
             hi_x = MAX(hi_x, v->pos.x);
             lo_z = MIN(lo_z, v->pos.z);
@@ -3946,6 +3978,9 @@ typedef struct {
 // the ray crosses the grid's sectors outside the box (foot: its sectors, x0
 // z0 x1 z1) and stops at the first such wall. A ray goes through the rest of
 // the room as the eye is, so that a room seen from another one is tested too.
+// TEMP: each sector the C walk crosses goes to the log (DC_MeshBatcher_TraceRay).
+static bool m_TraceRay = false;
+
 [[maybe_unused]] static bool M_SightBlockedC(
     const M_SIGHT *const s, const float to[3], const int32_t foot[4])
 {
@@ -3986,13 +4021,29 @@ typedef struct {
             next_z += step_z;
         }
         if ((ix >= foot[0] && ix <= foot[2] && iz >= foot[1] && iz <= foot[3])
-            || ix < 0 || iz < 0 || ix >= room->size.x || iz >= room->size.z) {
+            // The border ring of walls is where the next rooms' floors lie
+            // (a ray from one of them crosses it in the open), not rock.
+            || ix < 1 || iz < 1 || ix >= room->size.x - 1
+            || iz >= room->size.z - 1) {
             continue;
         }
         const int32_t at = iz + ix * room->size.z;
         const SECTOR *const sector = &room->sectors[at];
         const float y_in = s->eye[1] + dy * enter;
         const float y_out = s->eye[1] + dy * MIN(next_x, next_z);
+        if (m_TraceRay) {
+            LOG_INFO(
+                "[trace]   s %d,%d fl %d wall %d pit %d split %d see %d top %d "
+                "y %d..%d lo %d hi %d",
+                ix, iz,
+                sector->floor.height == NO_HEIGHT
+                    ? -99999
+                    : sector->floor.height - room->pos.y,
+                sector->portal_room.wall, sector->portal_room.pit,
+                sector->floor.is_split, s->see_through[at],
+                s->wall_top[at] == FLT_MAX ? -99999 : (int)s->wall_top[at],
+                (int)y_in, (int)y_out, (int)s->y_lo, (int)s->y_hi);
+        }
         if (sector->floor.height == NO_HEIGHT) {
             // A wall, from the highest point of its faces down to the room's
             // floor: a ray over it (a low wall, a rock) sees what is behind.
@@ -4014,7 +4065,8 @@ typedef struct {
         if (sector->portal_room.pit == NO_ROOM && !floor->is_split) {
             const float lowest = (float)(floor->height - room->pos.y)
                 + 256.0f * (ABS(floor->tilt.x) + ABS(floor->tilt.z));
-            if (y_in > lowest && y_out > lowest) {
+            // (An eye under this floor looks up past it, from a room below.)
+            if (s->eye[1] <= lowest && y_in > lowest && y_out > lowest) {
                 return true;
             }
         }
@@ -4306,6 +4358,12 @@ bool DC_MeshBatcher_RayBlocked(
         .y_lo = (float)(room->max_ceiling - room->pos.y),
         .y_hi = (float)(room->min_floor - room->pos.y),
     };
+    // An eye above or below the room looks into it through a floor or a
+    // ceiling: its rays run under the floors on their way there, which is not
+    // rock (Cistern's rooms seen from the one below lost their faces).
+    if (sight.eye[1] < sight.y_lo || sight.eye[1] > sight.y_hi) {
+        return false;
+    }
     const float point[3] = { (float)(to->x - room->pos.x),
                              (float)(to->y - room->pos.y),
                              (float)(to->z - room->pos.z) };
@@ -4318,6 +4376,545 @@ bool DC_MeshBatcher_RayBlocked(
 #else
     return false;
 #endif
+}
+
+// TEMP: the same ray, walked in C with each sector logged.
+void DC_MeshBatcher_TraceRay(
+    const MESH_BATCHER *const batcher, const OUTPUT_MESH *const mesh,
+    const ROOM *const room, const XYZ_32 *const eye, const XYZ_32 *const to)
+{
+#if TRX_DC_OCCLUDE
+    M_BINDING *const bind = M_GetBinding(batcher, mesh);
+    if (bind == nullptr || bind->see_through == nullptr || room->sectors == nullptr) {
+        LOG_INFO("[trace]  room %d: no grid", Room_GetIndex(room));
+        return;
+    }
+    const M_SIGHT sight = {
+        .room = room,
+        .see_through = bind->see_through,
+        .wall_top = bind->wall_top,
+        .eye = { (float)(eye->x - room->pos.x), (float)(eye->y - room->pos.y),
+                 (float)(eye->z - room->pos.z) },
+        .y_lo = (float)(room->max_ceiling - room->pos.y),
+        .y_hi = (float)(room->min_floor - room->pos.y),
+    };
+    const float point[3] = { (float)(to->x - room->pos.x),
+                             (float)(to->y - room->pos.y),
+                             (float)(to->z - room->pos.z) };
+    LOG_INFO(
+        "[trace]  room %d size %dx%d eye %d,%d,%d to %d,%d,%d y %d..%d%s",
+        Room_GetIndex(room), room->size.x, room->size.z, (int)sight.eye[0],
+        (int)sight.eye[1], (int)sight.eye[2], (int)point[0], (int)point[1],
+        (int)point[2], (int)sight.y_lo, (int)sight.y_hi,
+        sight.eye[1] < sight.y_lo || sight.eye[1] > sight.y_hi
+            ? " EYE OUTSIDE HEIGHT"
+            : "");
+    const int32_t x = (int32_t)floorf(point[0] * (1.0f / WALL_L));
+    const int32_t z = (int32_t)floorf(point[2] * (1.0f / WALL_L));
+    const int32_t foot[4] = { x - 1, z - 1, x + 1, z + 1 };
+    m_TraceRay = true;
+    const bool blocked = M_SightBlockedC(&sight, point, foot);
+    m_TraceRay = false;
+    LOG_INFO("[trace]  blocked %d", (int)blocked);
+#endif
+}
+
+// The occlusion buffer: a coarse depth buffer over the game's view, painted
+// with the big opaque faces of the rooms that show, nearest room first, and
+// asked whether a room's window lies wholly behind them (rooms/draw.c,
+// M_FindOccluded). It keeps 1 / view z (0: nothing there): per cell the
+// nearest face whose plane covers its centre, at the farthest that plane
+// comes within the cell. A room is hidden only when every cell of its window
+// and one more all round (a gap narrower than a cell still shows) lies nearer
+// than the room's nearest portal. View z is the game's (1 << W2V_SHIFT per
+// world unit).
+#define M_OCC_W 32
+#define M_OCC_H 24
+// Twice the area of the smallest triangle that paints (world units squared).
+#define M_OCC_MIN_AREA2 (128.0f * 128.0f)
+// A corner nearer than this leaves its face out.
+#define M_OCC_NEAR (64.0f * (1 << W2V_SHIFT))
+
+static float m_OccW[M_OCC_H][M_OCC_W];
+// TEMP: triangles transformed, painted, cells spanned, rooms painted, and us
+// in AddRoom, -, in Begin, since the last log.
+uint32_t g_DC_OccStats[10];
+// TEMP: the next rooms tested log their windows (rooms/draw.c sets it).
+bool g_DC_OccDump = false;
+static struct {
+    float x0;
+    float y0;
+    float sx;
+    float sy;
+    float cx;
+    float cy;
+    float persp;
+} m_OccView;
+
+// Whole parts without the library's floorf / ceilf calls (the occlusion
+// buffer's cell numbers are small).
+static inline int32_t M_OccFloor(const float x)
+{
+    const int32_t i = (int32_t)x;
+    return i - (x < (float)i);
+}
+
+static inline int32_t M_OccCeil(const float x)
+{
+    const int32_t i = (int32_t)x;
+    return i + (x > (float)i);
+}
+
+void DC_Occl_Begin(
+    const int32_t min_x, const int32_t min_y, const int32_t max_x,
+    const int32_t max_y, const int32_t center_x, const int32_t center_y,
+    const int32_t persp)
+{
+    const uint64_t b0 = timer_us_gettime64(); // TEMP
+    m_OccView.x0 = (float)min_x;
+    m_OccView.y0 = (float)min_y;
+    m_OccView.sx = M_OCC_W / (float)MAX(1, max_x - min_x + 1);
+    m_OccView.sy = M_OCC_H / (float)MAX(1, max_y - min_y + 1);
+    m_OccView.cx = (float)center_x;
+    m_OccView.cy = (float)center_y;
+    m_OccView.persp = (float)persp;
+    memset(m_OccW, 0, sizeof(m_OccW));
+    g_DC_OccStats[6] += (uint32_t)(timer_us_gettime64() - b0); // TEMP
+}
+
+bool DC_Occl_RectHidden(
+    const int32_t left, const int32_t top, const int32_t right,
+    const int32_t bottom, const float z_min)
+{
+    if (left >= right || top >= bottom || z_min <= 0.0f) {
+        return false;
+    }
+    const float w_min = 1.0f / z_min;
+    const int32_t x0 =
+        MAX(0, M_OccFloor((left - m_OccView.x0) * m_OccView.sx) - 1);
+    const int32_t x1 = MIN(
+        M_OCC_W - 1, M_OccFloor((right - m_OccView.x0) * m_OccView.sx) + 1);
+    const int32_t y0 =
+        MAX(0, M_OccFloor((top - m_OccView.y0) * m_OccView.sy) - 1);
+    const int32_t y1 = MIN(
+        M_OCC_H - 1,
+        M_OccFloor((bottom - m_OccView.y0) * m_OccView.sy) + 1);
+    if (g_DC_OccDump) { // TEMP: how much of the window is covered, and how
+        int32_t covered = 0;
+        for (int32_t y = y0; y <= y1; y++) {
+            for (int32_t x = x0; x <= x1; x++) {
+                covered += m_OccW[y][x] > w_min;
+            }
+        }
+        LOG_INFO(
+            "[occl]  window %d,%d..%d,%d: %d of %d covered, z_min %d", left,
+            top, right, bottom, covered, (x1 - x0 + 1) * (y1 - y0 + 1),
+            (int)(z_min / (1 << W2V_SHIFT)));
+        for (int32_t y = y0; y <= y1; y++) {
+            char line[M_OCC_W + 1];
+            int32_t n = 0;
+            for (int32_t x = x0; x <= x1; x++) {
+                line[n++] = m_OccW[y][x] == 0.0f ? '.'
+                    : m_OccW[y][x] > w_min       ? '#'
+                                                 : 'o';
+            }
+            line[n] = '\0';
+            LOG_INFO("[occl]   %s", line);
+        }
+    }
+    for (int32_t y = y0; y <= y1; y++) {
+        for (int32_t x = x0; x <= x1; x++) {
+            if (m_OccW[y][x] <= w_min) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Whether a portal (its corners in view space, all in front of the camera)
+// lies wholly behind what is painted, within the window (screen pixels):
+// every cell it touches has a face nearer than the nearest the portal comes
+// in that cell. A portal outside the window touches none, and is hidden.
+bool DC_Occl_PortalHidden(
+    const float v[4][3], const int32_t left, const int32_t top,
+    const int32_t right, const int32_t bottom)
+{
+    const float kx = m_OccView.persp * m_OccView.sx;
+    const float ky = m_OccView.persp * m_OccView.sy;
+    const float bx = (m_OccView.cx - m_OccView.x0) * m_OccView.sx - 0.5f;
+    const float by = (m_OccView.cy - m_OccView.y0) * m_OccView.sy - 0.5f;
+    float p[4][2];
+    float w[4];
+    float w_near = 0.0f;
+    for (int32_t k = 0; k < 4; k++) {
+        if (v[k][2] < 1.0f) {
+            return false;
+        }
+        w[k] = 1.0f / v[k][2];
+        p[k][0] = bx + v[k][0] * w[k] * kx;
+        p[k][1] = by + v[k][1] * w[k] * ky;
+        w_near = MAX(w_near, w[k]);
+    }
+    // The cells the window overlaps (cell c spans c - 0.5 to c + 0.5).
+    const int32_t wx0 =
+        MAX(0, M_OccFloor((left - m_OccView.x0) * m_OccView.sx));
+    const int32_t wx1 = MIN(
+        M_OCC_W - 1, M_OccFloor((right + 1 - m_OccView.x0) * m_OccView.sx));
+    const int32_t wy0 =
+        MAX(0, M_OccFloor((top - m_OccView.y0) * m_OccView.sy));
+    const int32_t wy1 = MIN(
+        M_OCC_H - 1, M_OccFloor((bottom + 1 - m_OccView.y0) * m_OccView.sy));
+    // The portal's plane: 1 / z over the screen, and the most it rises within
+    // half a cell either way. Seen edge on: its nearest corner everywhere.
+    float gx = 0.0f;
+    float gy = 0.0f;
+    float slack = 0.0f;
+    bool plane = false;
+    {
+        const float ex1 = p[1][0] - p[0][0];
+        const float ey1 = p[1][1] - p[0][1];
+        const float ex2 = p[2][0] - p[0][0];
+        const float ey2 = p[2][1] - p[0][1];
+        const float det = ex1 * ey2 - ex2 * ey1;
+        if (fabsf(det) > 0.25f) {
+            const float dw1 = w[1] - w[0];
+            const float dw2 = w[2] - w[0];
+            gx = (dw1 * ey2 - dw2 * ey1) / det;
+            gy = (dw2 * ex1 - dw1 * ex2) / det;
+            slack = 0.5f * (fabsf(gx) + fabsf(gy));
+            plane = true;
+        }
+    }
+    const float ymin = MIN(MIN(p[0][1], p[1][1]), MIN(p[2][1], p[3][1]));
+    const float ymax = MAX(MAX(p[0][1], p[1][1]), MAX(p[2][1], p[3][1]));
+    const int32_t y0 = MAX(wy0, M_OccFloor(ymin + 0.5f));
+    const int32_t y1 = MIN(wy1, M_OccCeil(ymax - 0.5f));
+    int32_t touched = 0; // TEMP
+    int32_t covered = 0; // TEMP
+    static char map[M_OCC_H][M_OCC_W + 1]; // TEMP
+    bool hidden = true;
+    for (int32_t y = y0; y <= y1; y++) {
+        // The portal's span across the row's band: each edge clipped to it.
+        const float b0 = y - 0.5f;
+        const float b1 = y + 0.5f;
+        float lo = FLT_MAX;
+        float hi = -FLT_MAX;
+        for (int32_t e = 0; e < 4; e++) {
+            const float *const a = p[e];
+            const float *const b = p[(e + 1) & 3];
+            const float ya = MAX(b0, MIN(a[1], b[1]));
+            const float yb = MIN(b1, MAX(a[1], b[1]));
+            if (ya > yb) {
+                continue;
+            }
+            if (a[1] == b[1]) {
+                lo = MIN(lo, MIN(a[0], b[0]));
+                hi = MAX(hi, MAX(a[0], b[0]));
+                continue;
+            }
+            const float slope = (b[0] - a[0]) / (b[1] - a[1]);
+            const float xa = a[0] + (ya - a[1]) * slope;
+            const float xb = a[0] + (yb - a[1]) * slope;
+            lo = MIN(lo, MIN(xa, xb));
+            hi = MAX(hi, MAX(xa, xb));
+        }
+        const int32_t x0 = MAX(wx0, M_OccFloor(lo + 0.5f));
+        const int32_t x1 = MIN(wx1, M_OccCeil(hi - 0.5f));
+        if (g_DC_OccDump) { // TEMP
+            memset(map[y], ' ', M_OCC_W);
+            map[y][M_OCC_W] = '\0';
+        }
+        for (int32_t x = x0; x <= x1; x++) {
+            float wc = w_near;
+            if (plane) {
+                wc = MIN(
+                    w_near,
+                    w[0] + gx * (x - p[0][0]) + gy * (y - p[0][1]) + slack);
+            }
+            const bool ok = m_OccW[y][x] > wc;
+            if (g_DC_OccDump) { // TEMP
+                touched++;
+                covered += ok;
+                map[y][x] = m_OccW[y][x] == 0.0f ? '.' : ok ? '#' : 'o';
+                hidden = hidden && ok;
+                continue;
+            }
+            if (!ok) {
+                return false;
+            }
+        }
+    }
+    if (g_DC_OccDump) { // TEMP
+        LOG_INFO(
+            "[occl]  portal %d,%d..%d,%d: %d of %d covered, z_near %d", left,
+            top, right, bottom, covered, touched,
+            (int)(1.0f / w_near / (1 << W2V_SHIFT)));
+        for (int32_t y = y0; y <= y1; y++) {
+            int32_t a = 0;
+            int32_t b = M_OCC_W - 1;
+            while (a < M_OCC_W && map[y][a] == ' ') {
+                a++;
+            }
+            while (b > a && map[y][b] == ' ') {
+                b--;
+            }
+            map[y][b + 1] = '\0';
+            LOG_INFO("[occl]   %3d %s", a, a < M_OCC_W ? &map[y][a] : "");
+        }
+    }
+    return hidden;
+}
+
+// Paints a triangle (cell space: a cell's centre at whole numbers; w: 1 / z
+// at its corners) into the cells whose centres it covers, within the clip
+// (cells, inclusive: painting fewer cells never hides more).
+static void M_OccTri(
+    const float p[3][2], const float w[3], const int32_t clip[4])
+{
+    const int32_t y0 =
+        MAX(clip[1], M_OccCeil(MIN(p[0][1], MIN(p[1][1], p[2][1]))));
+    const int32_t y1 =
+        MIN(clip[3], M_OccFloor(MAX(p[0][1], MAX(p[1][1], p[2][1]))));
+    if (y0 > y1) {
+        return;
+    }
+    // 1 / z is a plane over the screen: its slopes, and the most it falls
+    // within half a cell either way (the farthest the face comes in a cell).
+    const float ex1 = p[1][0] - p[0][0];
+    const float ey1 = p[1][1] - p[0][1];
+    const float ex2 = p[2][0] - p[0][0];
+    const float ey2 = p[2][1] - p[0][1];
+    const float det = ex1 * ey2 - ex2 * ey1;
+    if (det == 0.0f) {
+        return;
+    }
+    const float inv_det = 1.0f / det;
+    const float dw1 = w[1] - w[0];
+    const float dw2 = w[2] - w[0];
+    const float gx = (dw1 * ey2 - dw2 * ey1) * inv_det;
+    const float gy = (dw2 * ex1 - dw1 * ex2) * inv_det;
+    const float w_far = MIN(w[0], MIN(w[1], w[2]));
+    const float slack = 0.5f * (fabsf(gx) + fabsf(gy));
+    // The corners top to bottom: the long edge a-c on one side, a-b then
+    // b-c on the other.
+    const float *a = p[0];
+    const float *b = p[1];
+    const float *c = p[2];
+    if (b[1] < a[1]) {
+        SWAP(a, b);
+    }
+    if (c[1] < b[1]) {
+        SWAP(b, c);
+        if (b[1] < a[1]) {
+            SWAP(a, b);
+        }
+    }
+    const float s_ac = (c[0] - a[0]) / (c[1] - a[1]);
+    const float s_ab = b[1] > a[1] ? (b[0] - a[0]) / (b[1] - a[1]) : 0.0f;
+    const float s_bc = c[1] > b[1] ? (c[0] - b[0]) / (c[1] - b[1]) : 0.0f;
+    const float w_base = w[0] - gx * p[0][0] - gy * p[0][1] - slack;
+    // Stepped a row at a time: the long edge, and 1 / z at x = 0.
+    float fy = (float)y0;
+    float x_long = a[0] + (fy - a[1]) * s_ac;
+    float w_row = w_base + gy * fy;
+    for (int32_t y = y0; y <= y1;
+         y++, fy += 1.0f, x_long += s_ac, w_row += gy) {
+        const float x_short = fy < b[1] ? a[0] + (fy - a[1]) * s_ab
+                                        : b[0] + (fy - b[1]) * s_bc;
+        const int32_t x0 = MAX(clip[0], M_OccCeil(MIN(x_long, x_short)));
+        const int32_t x1 = MIN(clip[2], M_OccFloor(MAX(x_long, x_short)));
+        if (x0 > x1) {
+            continue;
+        }
+        g_DC_OccStats[2] += x1 - x0 + 1; // TEMP
+        float *const row = m_OccW[y];
+        float cw = w_row + gx * (float)x0;
+        for (int32_t x = x0; x <= x1; x++, cw += gx) {
+            const float v = MAX(cw, w_far);
+            if (v > row[x]) {
+                row[x] = v;
+            }
+        }
+    }
+}
+
+// The most vertices a mesh paints with (the rest of its faces do not paint).
+#define M_OCC_MAX_VERTICES 4096
+
+// Gathers the mesh's big opaque triangles and their vertices, each once.
+static void M_OcclBuild(M_BINDING *const bind, const OUTPUT_MESH *const mesh)
+{
+    const OUTPUT_MESH_VERTEX *const vertices = Vector_GetData(mesh->vertices);
+    const OUTPUT_MESH_INDEX *const opaque =
+        Vector_GetData(mesh->opaque_vertex_indices);
+    const int32_t clean = mesh->opaque_nodiscard_count;
+    const int32_t vertex_count = mesh->vertices->count;
+    if (clean < 3 || vertex_count <= 0) {
+        return;
+    }
+    int32_t *const remap = Memory_Alloc(sizeof(int32_t) * vertex_count);
+    memset(remap, 0xFF, sizeof(int32_t) * vertex_count);
+    uint16_t *const tris = Memory_Alloc(sizeof(uint16_t) * clean);
+    int32_t n = 0;
+    int32_t nv = 0;
+    for (int32_t i = 0; i + 2 < clean; i += 3) {
+        const OUTPUT_MESH_VERTEX *c[3];
+        for (int32_t k = 0; k < 3; k++) {
+            c[k] = M_Corner(bind, vertices, opaque[i + k]);
+        }
+        const float e1[3] = { c[1]->pos.x - c[0]->pos.x,
+                              c[1]->pos.y - c[0]->pos.y,
+                              c[1]->pos.z - c[0]->pos.z };
+        const float e2[3] = { c[2]->pos.x - c[0]->pos.x,
+                              c[2]->pos.y - c[0]->pos.y,
+                              c[2]->pos.z - c[0]->pos.z };
+        const float nx = e1[1] * e2[2] - e1[2] * e2[1];
+        const float ny = e1[2] * e2[0] - e1[0] * e2[2];
+        const float nz = e1[0] * e2[1] - e1[1] * e2[0];
+        if (nx * nx + ny * ny + nz * nz < M_OCC_MIN_AREA2 * M_OCC_MIN_AREA2) {
+            continue;
+        }
+        int32_t fresh = 0;
+        for (int32_t k = 0; k < 3; k++) {
+            fresh += remap[c[k] - vertices] < 0;
+        }
+        if (nv + fresh > M_OCC_MAX_VERTICES) {
+            break;
+        }
+        for (int32_t k = 0; k < 3; k++) {
+            int32_t *const r = &remap[c[k] - vertices];
+            if (*r < 0) {
+                *r = nv++;
+            }
+            tris[n * 3 + k] = (uint16_t)*r;
+        }
+        n++;
+    }
+    bind->occ_count = n;
+    bind->occ_vertex_count = nv;
+    bind->occ_tris = tris;
+    bind->occ_pos = nv > 0 ? Memory_Alloc(sizeof(float) * 3 * nv) : nullptr;
+    for (int32_t i = 0; i < vertex_count; i++) {
+        if (remap[i] >= 0) {
+            bind->occ_pos[remap[i]][0] = vertices[i].pos.x;
+            bind->occ_pos[remap[i]][1] = vertices[i].pos.y;
+            bind->occ_pos[remap[i]][2] = vertices[i].pos.z;
+        }
+    }
+    Memory_Free(remap);
+}
+
+// The room's big opaque triangles facing the camera, within its window
+// (m: the game's matrix with the room's position).
+void DC_MeshBatcher_OcclAddRoom(
+    const MESH_BATCHER *const batcher, const OUTPUT_MESH *const mesh,
+    const MATRIX *const m, const int32_t left, const int32_t top,
+    const int32_t right, const int32_t bottom)
+{
+    const uint64_t a0 = timer_us_gettime64(); // TEMP
+    M_BINDING *const bind = mesh != nullptr ? M_GetBinding(batcher, mesh) : nullptr;
+    if (bind == nullptr) {
+        return;
+    }
+    if (!bind->occ_built) {
+        bind->occ_built = true;
+        M_OcclBuild(bind, mesh);
+    }
+    // The room shows only through its window: a face wholly outside it is
+    // not looked at (cell space, as the points below).
+    const float win[4] = {
+        (left - m_OccView.x0) * m_OccView.sx - 0.5f,
+        (top - m_OccView.y0) * m_OccView.sy - 0.5f,
+        (right - m_OccView.x0) * m_OccView.sx - 0.5f,
+        (bottom - m_OccView.y0) * m_OccView.sy - 0.5f,
+    };
+    // The room's faces show only within it: the cells to paint.
+    const int32_t clip[4] = {
+        MAX(0, M_OccFloor(win[0])),
+        MAX(0, M_OccFloor(win[1])),
+        MIN(M_OCC_W - 1, M_OccCeil(win[2])),
+        MIN(M_OCC_H - 1, M_OccCeil(win[3])),
+    };
+    // XMTRX: the game's matrix, column by column (as mat_load takes it).
+    static matrix_t mvm __attribute__((aligned(32)));
+    static matrix_t keep __attribute__((aligned(32)));
+    mvm[0][0] = (float)m->_00;
+    mvm[0][1] = (float)m->_10;
+    mvm[0][2] = (float)m->_20;
+    mvm[0][3] = 0.0f;
+    mvm[1][0] = (float)m->_01;
+    mvm[1][1] = (float)m->_11;
+    mvm[1][2] = (float)m->_21;
+    mvm[1][3] = 0.0f;
+    mvm[2][0] = (float)m->_02;
+    mvm[2][1] = (float)m->_12;
+    mvm[2][2] = (float)m->_22;
+    mvm[2][3] = 0.0f;
+    mvm[3][0] = (float)m->_03;
+    mvm[3][1] = (float)m->_13;
+    mvm[3][2] = (float)m->_23;
+    mvm[3][3] = 1.0f;
+    mat_store(&keep);
+    mat_load(&mvm);
+    g_DC_OccStats[0] += bind->occ_vertex_count; // TEMP
+    g_DC_OccStats[3]++;
+    const float kx = m_OccView.persp * m_OccView.sx;
+    const float ky = m_OccView.persp * m_OccView.sy;
+    const float bx = (m_OccView.cx - m_OccView.x0) * m_OccView.sx - 0.5f;
+    const float by = (m_OccView.cy - m_OccView.y0) * m_OccView.sy - 0.5f;
+    // Each vertex once: screen point in cells, 1 / z, and which sides of
+    // the window it is past (16: too near), so that a triangle wholly to one
+    // side is let go by its corners' bits alone.
+    static float pts[M_OCC_MAX_VERTICES][3];
+    static uint8_t outs[M_OCC_MAX_VERTICES];
+    for (int32_t i = 0; i < bind->occ_vertex_count; i++) {
+        float xv = bind->occ_pos[i][0];
+        float yv = bind->occ_pos[i][1];
+        float zv = bind->occ_pos[i][2];
+        mat_trans_single3_nodiv(xv, yv, zv);
+        if (zv < M_OCC_NEAR) {
+            outs[i] = 16;
+            continue;
+        }
+        const float w = 1.0f / zv;
+        const float x = bx + xv * w * kx;
+        const float y = by + yv * w * ky;
+        pts[i][0] = x;
+        pts[i][1] = y;
+        pts[i][2] = w;
+        outs[i] = (x < win[0]) | ((x > win[2]) << 1) | ((y < win[1]) << 2)
+            | ((y > win[3]) << 3);
+    }
+    const uint64_t t0 = timer_us_gettime64(); // TEMP
+    const uint16_t *tri = bind->occ_tris;
+    for (int32_t t = 0; t < bind->occ_count; t++, tri += 3) {
+        const uint8_t o0 = outs[tri[0]];
+        const uint8_t o1 = outs[tri[1]];
+        const uint8_t o2 = outs[tri[2]];
+        g_DC_OccStats[8]++; // TEMP
+        if (((o0 | o1 | o2) & 16) || (o0 & o1 & o2)) {
+            continue;
+        }
+        g_DC_OccStats[9]++; // TEMP
+        const float p[3][2] = {
+            { pts[tri[0]][0], pts[tri[0]][1] },
+            { pts[tri[1]][0], pts[tri[1]][1] },
+            { pts[tri[2]][0], pts[tri[2]][1] },
+        };
+        // Facing the camera: wound as M_IsBackFacing keeps (y down).
+        const float cross = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+            - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        if (cross >= 0.0f) {
+            continue;
+        }
+        g_DC_OccStats[1]++; // TEMP
+        const float w[3] = { pts[tri[0]][2], pts[tri[1]][2], pts[tri[2]][2] };
+        M_OccTri(p, w, clip);
+    }
+    mat_load(&keep);
+    g_DC_OccStats[5] += (uint32_t)(timer_us_gettime64() - t0); // TEMP
+    g_DC_OccStats[4] += (uint32_t)(timer_us_gettime64() - a0); // TEMP
 }
 
 // Picks the chunks of a room that show, and gathers their faces into the
@@ -4356,7 +4953,8 @@ static int32_t M_CullChunks(
         sight.wall_top = bind->wall_top;
         sight.y_lo = (float)(room->max_ceiling - room->pos.y);
         sight.y_hi = (float)(room->min_floor - room->pos.y);
-        sees = true;
+        // Not from above or below the room (as in DC_MeshBatcher_RayBlocked).
+        sees = sight.eye[1] >= sight.y_lo && sight.eye[1] <= sight.y_hi;
     }
 #endif
 #if TRX_DC_OCCLUDE
@@ -6570,39 +7168,40 @@ typedef struct {
     uint32_t sargb;
 } M_CLIP_VERT;
 
-static M_CLIP_VERT M_LoadClipVert(
+// Both write in place: returned by value, the 52 bytes were copied twice.
+M_HOT void M_LoadClipVert(
     const MESH_BATCHER *const batcher, const int32_t idx, const float u,
-    const float v)
+    const float v, M_CLIP_VERT *const out)
 {
-    M_CLIP_VERT out = { .xv = batcher->xverts[idx], .u = u, .v = v };
-    M_Colours(batcher, idx, &out.argb, &out.oargb);
-    out.sargb = batcher->cel_emit ? batcher->sargb[idx] : 0;
-    return out;
+    out->xv = batcher->xverts[idx];
+    out->u = u;
+    out->v = v;
+    M_Colours(batcher, idx, &out->argb, &out->oargb);
+    out->sargb = batcher->cel_emit ? batcher->sargb[idx] : 0;
 }
 
-static M_CLIP_VERT M_ClipEdge(
-    const M_CLIP_VERT *const a, const M_CLIP_VERT *const b)
+M_HOT void M_ClipEdge(
+    const M_CLIP_VERT *const a, const M_CLIP_VERT *const b,
+    M_CLIP_VERT *const out)
 {
     const float t = (m_Frame.near_z - a->xv.z) / (b->xv.z - a->xv.z);
     const float x = a->xv.x + (b->xv.x - a->xv.x) * t;
     const float y = a->xv.y + (b->xv.y - a->xv.y) * t;
     const float inv_z = 1.0f / m_Frame.near_z;
     const int32_t ti = (int32_t)(t * 256.0f + 0.5f);
-    return (M_CLIP_VERT) {
-        .xv = {
-            .x = x,
-            .y = y,
-            .z = m_Frame.near_z,
-            .sx = m_Frame.proj_x * x * inv_z,
-            .sy = m_Frame.proj_y * y * inv_z,
-            .inv_z = inv_z,
-        },
-        .u = a->u + (b->u - a->u) * t,
-        .v = a->v + (b->v - a->v) * t,
-        .argb = M_LerpARGB(a->argb, b->argb, ti),
-        .oargb = M_LerpARGB(a->oargb, b->oargb, ti),
-        .sargb = M_LerpARGB(a->sargb, b->sargb, ti),
+    out->xv = (M_XVERT) {
+        .x = x,
+        .y = y,
+        .z = m_Frame.near_z,
+        .sx = m_Frame.proj_x * x * inv_z,
+        .sy = m_Frame.proj_y * y * inv_z,
+        .inv_z = inv_z,
     };
+    out->u = a->u + (b->u - a->u) * t;
+    out->v = a->v + (b->v - a->v) * t;
+    out->argb = M_LerpARGB(a->argb, b->argb, ti);
+    out->oargb = M_LerpARGB(a->oargb, b->oargb, ti);
+    out->sargb = M_LerpARGB(a->sargb, b->sargb, ti);
 }
 
 // Half a texel of a texture page, in page coordinates.
@@ -6824,6 +7423,27 @@ static void M_EmitTriangle(
         M_EmitFront(batcher, bind, idx);
         return;
     }
+    // The same turn as M_IsBackFacing for a face across the near plane,
+    // told in eye space: its winding on the screen has the sign of
+    // proj_x * proj_y * a . (b x c) wherever it lies in front (the part that
+    // shows). The PowerVR culls nothing, and these went out turned away too.
+    if (m_Frame.cull && !m_Frame.ortho) {
+        const M_XVERT *const a = &xv[i0];
+        const M_XVERT *const b = &xv[i1];
+        const M_XVERT *const c = &xv[i2];
+        const float e1[3] = { b->x - a->x, b->y - a->y, b->z - a->z };
+        const float e2[3] = { c->x - a->x, c->y - a->y, c->z - a->z };
+        const float n[3] = {
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        };
+        const float turn = n[0] * a->x + n[1] * a->y + n[2] * a->z;
+        if (m_Frame.proj_x * m_Frame.proj_y * turn >= 0.0f) {
+            g_DC_ProbeUs[DC_PROBE_E_BACK]++; // TEMP
+            return;
+        }
+    }
 
     const uint32_t *const sargb = batcher->sargb;
     const uint32_t away = batcher->face_light_count > 0 && batcher->cel_emit
@@ -6844,25 +7464,29 @@ static void M_EmitTriangle(
     M_GetFaceUVs(batcher, bind, idx, 3, uv);
     M_CLIP_VERT in[3];
     for (int32_t k = 0; k < 3; k++) {
-        in[k] = M_LoadClipVert(batcher, idx[k], uv[k][0], uv[k][1]);
+        M_LoadClipVert(batcher, idx[k], uv[k][0], uv[k][1], &in[k]);
         if (dark) {
             // No cel copy of a darkened face: its field carries the colour
             // without the dynamic lights through the clip instead.
             in[k].sargb = batcher->eargb[idx[k]];
         }
     }
-    M_CLIP_VERT poly[4];
+    // The corners kept are pointed at, not copied: only the two cuts are new.
+    M_CLIP_VERT cut[2];
+    const M_CLIP_VERT *poly[4];
     int32_t count = 0;
+    int32_t cuts = 0;
     for (int32_t k = 0; k < 3; k++) {
         const M_CLIP_VERT *const a = &in[k];
         const M_CLIP_VERT *const b = &in[(k + 1) % 3];
         const bool a_in = a->xv.z >= near_z;
         const bool b_in = b->xv.z >= near_z;
         if (a_in) {
-            poly[count++] = *a;
+            poly[count++] = a;
         }
-        if (a_in != b_in) {
-            poly[count++] = M_ClipEdge(a, b);
+        if (a_in != b_in && cuts < 2) {
+            M_ClipEdge(a, b, &cut[cuts]);
+            poly[count++] = &cut[cuts++];
         }
     }
     if (count < 3) {
@@ -6877,7 +7501,7 @@ static void M_EmitTriangle(
     const int32_t *const ord = order[count == 4];
     uint32_t cel_argb[4];
     for (int32_t k = 0; k < count; k++) {
-        const M_CLIP_VERT *const p = &poly[ord[k]];
+        const M_CLIP_VERT *const p = poly[ord[k]];
         M_Project(
             &p->xv, p->u, p->v,
             dark ? M_LerpARGB(p->argb, p->sargb, (int32_t)away) : p->argb,
@@ -7651,6 +8275,37 @@ static bool M_SoftFaces(M_SOFTFACES *const run)
 #endif
 }
 
+// Whether a box (object space) lies all off the soft shadow's cell, with the
+// shadow's matrix times the model view in XMTRX: its eight corners hold all
+// of it.
+static bool M_SoftBoxOff(
+    const float lo_in[3], const float hi_in[3], const bool persp,
+    const float dist, const bool world)
+{
+    const float *const b[2] = { lo_in, hi_in };
+    float lo[3];
+    float hi[3];
+    for (int32_t i = 0; i < 8; i++) {
+        float x = b[(i >> 0) & 1][0];
+        float y = b[(i >> 1) & 1][1];
+        float z = b[(i >> 2) & 1][2];
+        float w = 1.0f;
+        mat_trans_nodiv(x, y, z, w);
+        if (persp) {
+            const float f = M_PerspScale(dist, z);
+            x = 0.5f + (x - 0.5f) * f;
+            y = 0.5f + (y - 0.5f) * f;
+        }
+        const float p[3] = { x, y, z };
+        for (int32_t k = 0; k < 3; k++) {
+            lo[k] = i == 0 || p[k] < lo[k] ? p[k] : lo[k];
+            hi[k] = i == 0 || p[k] > hi[k] ? p[k] : hi[k];
+        }
+    }
+    return hi[0] < 0.0f || lo[0] > 1.0f || hi[1] < 0.0f || lo[1] > 1.0f
+        || (world && (lo[2] > M_SOFT_REACH || hi[2] < -M_SOFT_SPAN * 0.25f));
+}
+
 static void M_EmitShadowFaces(
     const MESH_BATCHER *const batcher, const M_BINDING *const bind,
     const int32_t l, const float cell_x, const float cell_y,
@@ -7686,28 +8341,52 @@ static void M_EmitShadowFaces(
     const bool persp = light->dist < M_PARALLEL_DIST;
     mat_load(&m);
     mat_apply(&batcher->mv);
-    float lo[3];
-    float hi[3];
-    for (int32_t i = 0; i < 8; i++) {
-        float x = bind->bounds[(i >> 0) & 1][0];
-        float y = bind->bounds[(i >> 1) & 1][1];
-        float z = bind->bounds[(i >> 2) & 1][2];
-        float w = 1.0f;
-        mat_trans_nodiv(x, y, z, w);
-        if (persp) {
-            const float f = M_PerspScale(light->dist, z);
-            x = 0.5f + (x - 0.5f) * f;
-            y = 0.5f + (y - 0.5f) * f;
-        }
-        const float p[3] = { x, y, z };
-        for (int32_t k = 0; k < 3; k++) {
-            lo[k] = i == 0 || p[k] < lo[k] ? p[k] : lo[k];
-            hi[k] = i == 0 || p[k] > hi[k] ? p[k] : hi[k];
-        }
-    }
-    if (hi[0] < 0.0f || lo[0] > 1.0f || hi[1] < 0.0f || lo[1] > 1.0f
-        || (world && (lo[2] > M_SOFT_REACH || hi[2] < -M_SOFT_SPAN * 0.25f))) {
+    if (M_SoftBoxOff(bind->bounds[0], bind->bounds[1], persp, light->dist, world)) {
         return;
+    }
+
+    // A room's chunks the same way: each holds its faces' vertices alone, so
+    // those off the cell are left out whole (the shadow falls on a few faces
+    // of one or two of them, and all the room's vertices were projected).
+    const int32_t whole[1][2] = { { 0, bind->vertex_count } };
+    const int32_t(*vr)[2] = batcher->vrange_count < 0 ? whole : batcher->vranges;
+    int32_t nvr = batcher->vrange_count < 0 ? 1 : batcher->vrange_count;
+    const M_RANGE *ranges = batcher->ranges;
+    int32_t range_count = batcher->range_count;
+    if (batcher->vrange_count >= 0 && bind->chunk_count > 0) {
+        static int32_t chunk_vr[M_MAX_CHUNKS][2];
+        static M_RANGE chunk_ranges[2 * M_MAX_CHUNKS];
+        int32_t n = 0;
+        int32_t nr = 0;
+        for (int32_t r = 0; r < batcher->vrange_count; r++) {
+            const int32_t k = batcher->vrange_chunk[r];
+            if (k < 0) {
+                continue; // blended and see-through faces: not in the runs
+            }
+            const M_CHUNK *const chunk = &bind->chunks[k];
+            if (M_SoftBoxOff(chunk->lo, chunk->hi, persp, light->dist, world)) {
+                continue;
+            }
+            chunk_vr[n][0] = batcher->vranges[r][0];
+            chunk_vr[n][1] = batcher->vranges[r][1];
+            n++;
+            for (int32_t run = 0; run < 2; run++) {
+                if (chunk->count[run] > 0) {
+                    chunk_ranges[nr++] = (M_RANGE) {
+                        .start = chunk->start[run],
+                        .count = chunk->count[run],
+                        .run = run,
+                    };
+                }
+            }
+        }
+        if (nr == 0) {
+            return;
+        }
+        vr = (const int32_t(*)[2])chunk_vr;
+        nvr = n;
+        ranges = chunk_ranges;
+        range_count = nr;
     }
 
     // Per vertex, what it lies past, as bits: a face whose corners all lie
@@ -7716,13 +8395,12 @@ static void M_EmitShadowFaces(
     float(*const soft)[3] = batcher->soft;
     uint8_t *const soft_off = batcher->soft_off;
     {
-        const int32_t whole[1][2] = { { 0, bind->vertex_count } };
         M_SOFTRUN run = {
             .xverts = batcher->xverts,
             .soft = soft,
             .soft_off = soft_off,
-            .vr = batcher->vrange_count < 0 ? whole : batcher->vranges,
-            .nvr = batcher->vrange_count < 0 ? 1 : batcher->vrange_count,
+            .vr = vr,
+            .nvr = nvr,
             .persp = persp,
             .dist = light->dist,
             .world = world,
@@ -7747,8 +8425,8 @@ static void M_EmitShadowFaces(
     // list at a time); the C below is the reference.
     M_SOFTFACES run = {
         .indices = indices,
-        .ranges = batcher->ranges,
-        .range_count = batcher->range_count,
+        .ranges = ranges,
+        .range_count = range_count,
         .xverts = batcher->xverts,
         .soft = soft,
         .soft_off = soft_off,
@@ -7850,6 +8528,20 @@ M_HOT uint32_t M_PackUnit(const float x)
 
 // atan2 to within 0.0015 radians (the relief quantises the angle to 256
 // steps of 0.025): a cubic in the smaller over the larger, then the octant.
+// 1 / x (x > 0) and the root of x (x >= 0) by fsrra: 4 cycles on the SH4
+// against fdiv's 13 and fsqrt's 23, which the next instruction waits for; to
+// about a millionth, well under a step of a colour.
+static inline float M_Recip(const float x)
+{
+    const float r = M_InvSqrt(x);
+    return r * r;
+}
+
+static inline float M_Sqrt0(const float x)
+{
+    return x * M_InvSqrt(x + 1.0e-12f);
+}
+
 M_HOT float M_Atan2(const float y, const float x)
 {
     const float ax = fabsf(x);
@@ -7859,7 +8551,7 @@ M_HOT float M_Atan2(const float y, const float x)
     if (hi <= 0.0f) {
         return 0.0f;
     }
-    const float a = lo / hi;
+    const float a = lo * M_Recip(hi);
     const float s = a * a;
     float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a
         + a;
@@ -7948,7 +8640,7 @@ static uint32_t M_BumpShade(
     // the face leaves the relief's range.
     const float flat = 1.0f - M_BUMP_DIM * (depth * (1.0f / M_BUMP_DEPTH));
     const float k2 = MIN(depth * lz, flat);
-    const float k3 = depth * sqrtf(1.0f - lz * lz) * steady_smooth;
+    const float k3 = depth * M_Sqrt0(1.0f - lz * lz) * steady_smooth;
     // The PowerVR's intensity is K1 + K2 sin S + K3 cos S cos(R - Q), linear
     // in the K: squeezed into M_BUMP_FLOOR to 1, a slope turned from the
     // light is shaded and no longer black, and a flat texel stays as it was.
@@ -7979,15 +8671,28 @@ static uint32_t M_BumpAt(
     // seemed to slide.
     const float l_sq = M_Dot3(l, l);
     const float c_sq = M_Dot3(pos, pos);
+    // How much the face looks along the half way direction, for the shine,
+    // and how much of the relief it may show: the relief has no mipmaps, and
+    // far off or seen edge on its texels flicker under a screen pixel as the
+    // camera moves, which the shine's slopes made glare.
+    float hz = 0.0f;
+    float detail = 0.0f;
     if (glow && l_sq > 0.0f && c_sq > 0.0f) {
         const float li = M_InvSqrt(l_sq);
         const float ci = M_InvSqrt(c_sq);
+        const float facing = -M_Dot3(pos, f->n) * ci * M_InvSqrt(f->nl);
+        const float near = M_Clamp(
+            (M_BUMP_SHINE_DETAIL_FAR - pos[2])
+                * (1.0f / (M_BUMP_SHINE_DETAIL_FAR - M_BUMP_SHINE_DETAIL_NEAR)),
+            0.0f, 1.0f);
+        detail = near * M_Clamp(facing * 3.0f, 0.0f, 1.0f);
         float h[3];
         for (int32_t k = 0; k < 3; k++) {
             h[k] = l[k] * li - pos[k] * ci;
         }
-        if (M_Dot3(h, h) > 1.0e-4f) {
-            memcpy(l, h, sizeof(l));
+        const float hh = M_Dot3(h, h);
+        if (hh > 1.0e-4f) {
+            hz = MAX(M_Dot3(h, f->n) * M_InvSqrt(f->nl * hh), 0.0f);
         }
     }
     const float ll = M_Dot3(l, l);
@@ -8000,15 +8705,9 @@ static uint32_t M_BumpAt(
     // How far the light lies off the face's normal: with it near the normal
     // the direction it lies across the face (Q) turns about at a breath, and
     // the relief would shimmer, so it is let go as that nears.
-    const float off = sqrtf(MAX(1.0f - lz * lz, 0.0f));
+    const float off = M_Sqrt0(MAX(1.0f - lz * lz, 0.0f));
     const float steady = M_Clamp((off - 0.30f) * (1.0f / 0.45f), 0.0f, 1.0f);
     const float steady_smooth = steady * steady * (3.0f - 2.0f * steady);
-    // The shine is let go sooner than the shade: where the light, the eye and
-    // the face line up it is the one that shimmers most.
-    const float shine_steady = M_Clamp((off - 0.5f) * (1.0f / 0.4f), 0.0f, 1.0f);
-    const float shine_smooth =
-        shine_steady * shine_steady * (3.0f - 2.0f * shine_steady);
-    lz = M_Clamp(lz, M_BUMP_MIN_SIN, 1.0f);
     float q = M_Atan2(ly, lx);
     if (q < 0.0f) {
         q += 2.0f * (float)M_PI;
@@ -8016,8 +8715,23 @@ static uint32_t M_BumpAt(
     const uint32_t q8 =
         (uint32_t)(q * (256.0f / (2.0f * (float)M_PI))) & 0xFF;
     if (glow) {
-        return (M_PackUnit(depth * shine_smooth) << 8) | q8;
+        // A specular spot, as OpenLara's water has: where the face looks
+        // along the half way direction, to a power (the corners give
+        // the spot, the PowerVR carries it across). Inside it the relief is lit
+        // from low down, from the light's side: the slopes turned to the
+        // light flare and the flat and the rest hardly do. Lit from the half
+        // way direction itself, near the normal, every texel took about the
+        // same, and the spot showed no relief (the PowerVR has no power per
+        // texel to tell them apart).
+        // A power of 8: sharper, the spot fell between the points it is
+        // worked out at and flickered as the camera moved.
+        const float h2 = hz * hz;
+        const float h4 = h2 * h2;
+        const float spot = depth * h4 * h4;
+        return (M_PackUnit(spot * M_BUMP_SHINE_FLAT) << 16)
+            | (M_PackUnit(spot * steady_smooth * detail) << 8) | q8;
     }
+    lz = M_Clamp(lz, M_BUMP_MIN_SIN, 1.0f);
     return M_BumpShade(depth, lz, steady_smooth, q8);
 }
 
@@ -8031,12 +8745,16 @@ typedef struct {
     int32_t count;
     // A passing light is among them: nothing is kept from the last frame.
     bool any_passing;
+    // Each one's radius squared and its reciprocal (M_Recip, as every vertex
+    // worked it out), once per room for dc_bump_shine.
+    float radius_sq[M_BUMP_MAX_LIGHTS];
+    float inv_radius_sq[M_BUMP_MAX_LIGHTS];
 } M_BUMP_LIGHTS;
 
 // What the lights give a vertex: the places of the room's, weighted by how
 // near they stand and how strong they are, and the same for the passing ones,
 // with the weights' sums.
-static void M_BumpGatherLights(
+static inline void M_BumpGatherLightsC(
     const M_BUMP_LIGHTS *const lights, const float pos[3], float room_pos[3],
     float *const room_total, float passing_pos[3], float *const passing)
 {
@@ -8054,10 +8772,10 @@ static void M_BumpGatherLights(
         if (dist_sq >= radius * radius) {
             continue;
         }
-        const float ratio_sq = dist_sq / (radius * radius);
-        const float near = 1.0f - sqrtf(ratio_sq);
+        const float ratio_sq = dist_sq * M_Recip(radius * radius);
+        const float near = 1.0f - M_Sqrt0(ratio_sq);
         const float weight =
-            lights->power[l] * near * near / (1.0f + ratio_sq);
+            lights->power[l] * near * near * M_Recip(1.0f + ratio_sq);
         float *const sum = lights->passing[l] ? passing_pos : room_pos;
         for (int32_t r = 0; r < 3; r++) {
             sum[r] += p[r] * weight;
@@ -8069,6 +8787,62 @@ static void M_BumpGatherLights(
         }
     }
 }
+
+// TRX_DC_ASMOFF2 bit 2147483648 (off by default, unlike the other bits) puts
+// this gathering (used by the cached relief's corners) in assembly
+// (bump_sh4.S): no faster than the C in the strict Flycast (DC build 1535),
+// to be weighed on a console. DC_EMIT_VERIFY runs both and compares them.
+#define M_BUMP_ASM_SHINE 2147483648u
+_Static_assert(offsetof(M_BUMP_LIGHTS, radius) == 192, "dc_bump_gather");
+_Static_assert(offsetof(M_BUMP_LIGHTS, power) == 256, "dc_bump_gather");
+_Static_assert(offsetof(M_BUMP_LIGHTS, passing) == 320, "dc_bump_gather");
+_Static_assert(offsetof(M_BUMP_LIGHTS, count) == 336, "dc_bump_gather");
+extern void dc_bump_gather(
+    const M_BUMP_LIGHTS *lights, const float pos[3], float out[8]);
+
+static inline void M_BumpGatherLights(
+    const M_BUMP_LIGHTS *const lights, const float pos[3], float room_pos[3],
+    float *const room_total, float passing_pos[3], float *const passing)
+{
+    if ((g_DC_AsmOff2 & M_BUMP_ASM_SHINE) == 0) {
+        M_BumpGatherLightsC(
+            lights, pos, room_pos, room_total, passing_pos, passing);
+        return;
+    }
+    float o[8];
+    dc_bump_gather(lights, pos, o);
+    room_pos[0] = o[0];
+    room_pos[1] = o[1];
+    room_pos[2] = o[2];
+    *room_total = o[3];
+    passing_pos[0] = o[4];
+    passing_pos[1] = o[5];
+    passing_pos[2] = o[6];
+    *passing = o[7];
+#if defined(DC_EMIT_VERIFY)
+    float c_room[3];
+    float c_room_total;
+    float c_pass[3];
+    float c_passing;
+    M_BumpGatherLightsC(lights, pos, c_room, &c_room_total, c_pass, &c_passing);
+    const float c[8] = { c_room[0], c_room[1], c_room[2], c_room_total,
+                         c_pass[0], c_pass[1], c_pass[2], c_passing };
+    static uint32_t m_Runs;
+    static uint32_t m_Bad;
+    bool bad = false;
+    for (int32_t k = 0; k < 8; k++) {
+        bad |= fabsf(o[k] - c[k]) > 1.0e-3f + 1.0e-4f * fabsf(c[k]);
+    }
+    if (bad && m_Bad++ < 8) {
+        LOG_INFO("[gather-verify] asm %f %f, C %f %f", (double)o[3],
+            (double)o[7], (double)c[3], (double)c[7]);
+    }
+    if (++m_Runs % 8192 == 0) {
+        LOG_INFO("[gather-verify] %u runs, %u different", m_Runs, m_Bad);
+    }
+#endif
+}
+
 
 // The relief's offset colour at one vertex of a face (see M_BumpAt), and how
 // much of the relief the vertex takes in *fade. The light is the blend of
@@ -8100,8 +8874,9 @@ static void M_BumpGatherLights(
     // The room lights give the direction; with none, one high above the
     // vertex (TR's y axis points down).
     if (room_total > 0.0f) {
+        const float inv = M_Recip(room_total);
         for (int32_t r = 0; r < 3; r++) {
-            light[r] = room_pos[r] / room_total;
+            light[r] = room_pos[r] * inv;
         }
     } else {
         for (int32_t r = 0; r < 3; r++) {
@@ -8116,9 +8891,10 @@ static void M_BumpGatherLights(
             M_Clamp(passing * 4.0f, 0.0f, 1.0f) * M_BUMP_PASSING_TILT;
         float room_dir[3];
         float passing_dir[3];
+        const float inv_passing = M_Recip(passing);
         for (int32_t r = 0; r < 3; r++) {
             room_dir[r] = light[r] - pos[r];
-            passing_dir[r] = passing_pos[r] / passing - pos[r];
+            passing_dir[r] = passing_pos[r] * inv_passing - pos[r];
         }
         const float room_sq = M_Dot3(room_dir, room_dir);
         const float passing_sq = M_Dot3(passing_dir, passing_dir);
@@ -8154,7 +8930,7 @@ static void M_BumpGatherLights(
         const uint32_t c = vert->argb;
         float lit = (float)MAX((c >> 16) & 0xFF, MAX((c >> 8) & 0xFF, c & 0xFF))
             * (1.0f / 255.0f);
-        strength *= lit * lit;
+        strength *= lit;
     }
     return M_BumpAt(frame, pos, light, strength, glow);
 }
@@ -8176,6 +8952,8 @@ typedef struct {
     const float *radius;          // 44
     const float *power;           // 48
     const bool *passing;          // 52
+    const float *radius_sq;       // 56 (dc_bump_shine)
+    const float *inv_radius_sq;   // 60
 } M_BUMPRUN;
 _Static_assert(offsetof(M_BUMPRUN, view1) == 28, "bump_sh4.S layout");
 _Static_assert(offsetof(M_BUMPRUN, passing) == 52, "bump_sh4.S layout");
@@ -8184,7 +8962,7 @@ _Static_assert(offsetof(M_BUMP_FRAME, tl) == 36, "bump_sh4.S layout");
 _Static_assert(offsetof(M_XVERT, argb) == 24, "bump_sh4.S layout");
 extern uint32_t dc_bump_vertex(M_BUMPRUN *run);
 
-static const float m_BumpK[33] = {
+static const float m_BumpK[37] = {
     1.0f, 4.0f, 8.0f * WALL_L, M_BUMP_PASSING_TILT, 1.0e-6f, M_BUMP_RANGE,
     1.0f / M_BUMP_FADE, M_BUMP_GLOW_RANGE, 1.0f / M_BUMP_GLOW_FADE,
     M_BUMP_DEPTH, M_BUMP_GLOW, 1.0f / 255.0f, 255.0f, 0.5f, 1.0e-4f, 0.30f,
@@ -8192,13 +8970,16 @@ static const float m_BumpK[33] = {
     -0.0464964749f, 0.15931422f, 0.327622764f, (float)(M_PI / 2.0),
     (float)M_PI, 2.0f * (float)M_PI, 256.0f / (2.0f * (float)M_PI),
     M_BUMP_FLOOR, 1.0f - M_BUMP_FLOOR, M_BUMP_DIM, 1.0f / M_BUMP_DEPTH,
+    1.0e-12f, // 33: what M_Sqrt0 adds before its fsrra
+    M_BUMP_SHINE_DETAIL_FAR, // 34
+    1.0f / (M_BUMP_SHINE_DETAIL_FAR - M_BUMP_SHINE_DETAIL_NEAR), // 35
+    M_BUMP_SHINE_FLAT, // 36
 };
 
 // A room lit by the place its vertices are brightest in (no light of its own)
 // shows the relief's shade twice as deep: it was too faint to see. Set per
 // room in M_EmitBump; the shine and a passing light's relief are left alone.
 static float m_BumpBoost;
-
 // by_light (0 to 1) is how much a passing light (a flash, a flare) lights the
 // vertex: its relief is not boosted, and the boost fades out as it comes.
 static uint32_t M_BumpBoost(const uint32_t c, const float by_light)
@@ -8217,6 +8998,63 @@ static uint32_t M_BumpBoost(const uint32_t c, const float by_light)
     return (k1n << 24) | (k2n << 16) | (k3n << 8) | (c & 0xFF);
 }
 
+extern uint32_t dc_bump_shine(M_BUMPRUN *run);
+_Static_assert(offsetof(M_BUMP_FRAME, nl) == 44, "dc_bump_shine layout");
+
+// The shine at a vertex, by dc_bump_shine (bump_sh4.S);
+// a build with DC_EMIT_VERIFY runs the C too and compares them.
+static uint32_t M_BumpShine(
+    const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
+    const M_XVERT *const vert, float *const fade, float *const by_light)
+{
+    M_BUMPRUN run = {
+        .lights = lights,
+        .frame = frame,
+        .vert = vert,
+        .glow = 1,
+        .fade = fade,
+        .by_light = by_light,
+        .k = m_BumpK,
+        .view1 = {
+            1.5f * m_Frame.view[1][0] + m_Frame.view[0][0] + m_Frame.view[2][0],
+            1.5f * m_Frame.view[1][1] + m_Frame.view[0][1] + m_Frame.view[2][1],
+            1.5f * m_Frame.view[1][2] + m_Frame.view[0][2] + m_Frame.view[2][2],
+        },
+        .count = lights->count,
+        .radius = lights->radius,
+        .power = lights->power,
+        .passing = lights->passing,
+        .radius_sq = lights->radius_sq,
+        .inv_radius_sq = lights->inv_radius_sq,
+    };
+    const uint32_t colour = dc_bump_shine(&run);
+#if defined(DC_EMIT_VERIFY)
+    static uint32_t m_Runs;
+    static uint32_t m_Bad;
+    float ref_fade;
+    float ref_by_light;
+    const uint32_t ref =
+        M_BumpVertexC(lights, frame, vert, true, &ref_fade, &ref_by_light);
+    bool bad = fabsf(ref_fade - *fade) > 1.0e-3f
+        || fabsf(ref_by_light - *by_light) > 1.0e-3f;
+    for (int32_t shift = 0; shift < 32 && !bad; shift += 8) {
+        const int32_t a = (int32_t)((colour >> shift) & 0xFF);
+        const int32_t b = (int32_t)((ref >> shift) & 0xFF);
+        // The angle may be one step apart (it wraps at 256).
+        const int32_t d = abs(a - b);
+        bad = shift == 0 ? (d > 2 && d < 254) : d > 2;
+    }
+    if (bad && m_Bad++ < 8) {
+        LOG_INFO("[shine-verify] asm %08x, C %08x", (unsigned)colour,
+            (unsigned)ref);
+    }
+    if (++m_Runs % 8192 == 0) {
+        LOG_INFO("[shine-verify] %u runs, %u different", m_Runs, m_Bad);
+    }
+#endif
+    return colour;
+}
+
 static uint32_t M_BumpVertexRaw(
     const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
     const M_XVERT *const vert, const bool glow, float *const fade,
@@ -8224,6 +9062,11 @@ static uint32_t M_BumpVertexRaw(
 {
     if ((g_DC_AsmOff & 512) != 0) {
         return M_BumpVertexC(lights, frame, vert, glow, fade, by_light);
+    }
+    // The shine by dc_bump_shine, written for the SH-4 (dc_bump_vertex has a
+    // translation of the C, slower: DC build 1530).
+    if (glow) {
+        return M_BumpShine(lights, frame, vert, fade, by_light);
     }
     M_BUMPRUN run = {
         .lights = lights,
@@ -8308,18 +9151,29 @@ static uint32_t M_BumpVertex(
 static bool M_EmitBumpGrid(
     MESH_BATCHER *const batcher, const M_BINDING *const bind,
     const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
-    const OUTPUT_MESH_INDEX *const tri, const bool glow)
+    const OUTPUT_MESH_INDEX *const tri, const bool glow,
+    const uint32_t *const corner_k)
 {
     const OUTPUT_MESH_INDEX strip[4] = { tri[0], tri[1], tri[2], tri[5] };
     const M_XVERT *const xv = batcher->xverts;
+    // A quad partly behind the near plane draws only its pieces in front of
+    // it (below): given up whole, a near floor's shine went back and forth
+    // between this and its corners as the camera moved, and flickered.
+    bool all_behind = true;
     for (int32_t c = 0; c < 4; c++) {
-        if ((xv[strip[c]].clip & M_CLIP_NEAR) != 0) {
-            return false;
-        }
+        all_behind &= (xv[strip[c]].clip & M_CLIP_NEAR) != 0;
+    }
+    if (all_behind) {
+        return false;
     }
     if (m_Frame.cull
         && M_IsBackFacing(&xv[strip[0]], &xv[strip[1]], &xv[strip[2]])) {
         return true;
+    }
+    // The grid takes some 50 vertices: with less room left, the face goes as
+    // it would with no grid (its relief at the corners).
+    if (DC_PVR_ReliefRoom() < 64 * sizeof(pvr_vertex_t)) {
+        return false;
     }
     float uv[4][2];
     M_GetFaceUVs(batcher, bind, strip, 4, uv);
@@ -8359,23 +9213,33 @@ static bool M_EmitBumpGrid(
                 grid_uv[row * M_N + col][0] += uv[c][0] * w[c];
                 grid_uv[row * M_N + col][1] += uv[c][1] * w[c];
             }
-            g->inv_z = 1.0f / g->z;
+            g->inv_z = g->z > 0.0f ? 1.0f / g->z : 0.0f; // behind: not drawn
             g->sx = m_Frame.proj_x * g->x * g->inv_z;
             g->sy = m_Frame.proj_y * g->y * g->inv_z;
             // A hair nearer than the face under it: the pieces do not lie at
             // exactly the depth its whole does, and would win and lose to it
             // pixel by pixel, shimmering as the camera moves.
             g->inv_z *= M_BUMP_GRID_NEAR;
-            float argb[4] = {};
+            // The weights are quarters: in whole quarters, two bytes at a
+            // time, the sum rounded as the float one was (exact).
+            uint32_t lo = 0;
+            uint32_t hi = 0;
             for (int32_t c = 0; c < 4; c++) {
                 const uint32_t k = xv[strip[c]].argb;
-                for (int32_t b = 0; b < 4; b++) {
-                    argb[b] += (float)((k >> (b * 8)) & 0xFF) * w[c];
-                }
+                const uint32_t q = (uint32_t)(w[c] * 4.0f);
+                lo += (k & 0x00FF00FFu) * q;
+                hi += ((k >> 8) & 0x00FF00FFu) * q;
             }
-            g->argb = 0;
-            for (int32_t b = 0; b < 4; b++) {
-                g->argb |= (uint32_t)(argb[b] + 0.5f) << (b * 8);
+            g->argb = (((lo + 0x00020002u) >> 2) & 0x00FF00FFu)
+                | ((((hi + 0x00020002u) >> 2) & 0x00FF00FFu) << 8);
+            // A corner of the grid is the face's own: its relief is known.
+            const int32_t corner = (row == 0 || row == M_BUMP_SPLIT)
+                    && (col == 0 || col == M_BUMP_SPLIT)
+                ? (row != 0) * 2 + (col != 0)
+                : -1;
+            if (corner_k != nullptr && corner >= 0) {
+                grid_k[row * M_N + col] = corner_k[corner];
+                continue;
             }
             float fade;
             float by_light;
@@ -8383,35 +9247,80 @@ static bool M_EmitBumpGrid(
                 M_BumpVertex(lights, frame, g, glow, &fade, &by_light);
         }
     }
+    // Each row of pieces goes out as one strip of shared corners (10 vertices
+    // for 4 pieces, not 16: the translucent list overflowed with them): the
+    // same triangles, split along the same diagonal, with the same values. A
+    // piece with its Q evened out breaks the strip and goes out on its own,
+    // as one behind the near plane is left out.
     for (int32_t row = 0; row < M_BUMP_SPLIT; row++) {
-        for (int32_t col = 0; col < M_BUMP_SPLIT; col++) {
+        int32_t run = -1; // the strip's first piece
+        for (int32_t col = 0; col <= M_BUMP_SPLIT; col++) {
             const int32_t at[4] = {
                 row * M_N + col, row * M_N + col + 1, (row + 1) * M_N + col,
                 (row + 1) * M_N + col + 1,
             };
+            bool behind = col == M_BUMP_SPLIT;
+            for (int32_t c = 0; c < 4 && !behind; c++) {
+                behind |= grid[at[c]].z < m_Frame.near_z;
+            }
             uint32_t k[4];
-            for (int32_t c = 0; c < 4; c++) {
-                k[c] = grid_k[at[c]];
-            }
-            // Q is one byte that comes round from 255 to 0, and would run
-            // through every direction in between: a piece whose corners lie
-            // too far apart (right under the light, where the relief is let
-            // go in any case) has the direction of its strongest corner.
-            uint32_t q_min = 255;
-            uint32_t q_max = 0;
-            int32_t strongest = 0;
-            for (int32_t c = 0; c < 4; c++) {
-                q_min = MIN(q_min, k[c] & 0xFF);
-                q_max = MAX(q_max, k[c] & 0xFF);
-                if (((k[c] >> 8) & 0xFF) > ((k[strongest] >> 8) & 0xFF)) {
-                    strongest = c;
-                }
-            }
-            if (q_max - q_min > M_BUMP_SPLIT_Q) {
-                const uint32_t q = k[strongest] & 0xFF;
+            bool evened = false;
+            if (!behind) {
                 for (int32_t c = 0; c < 4; c++) {
-                    k[c] = (k[c] & ~0xFFu) | q;
+                    k[c] = grid_k[at[c]];
                 }
+                // Q is one byte that comes round from 255 to 0, and would run
+                // through every direction in between: a piece whose corners
+                // lie too far apart (right under the light, where the relief
+                // is let go in any case) has the direction of its strongest
+                // corner.
+                uint32_t q_min = 255;
+                uint32_t q_max = 0;
+                int32_t strongest = 0;
+                for (int32_t c = 0; c < 4; c++) {
+                    q_min = MIN(q_min, k[c] & 0xFF);
+                    q_max = MAX(q_max, k[c] & 0xFF);
+                    if (((k[c] >> 8) & 0xFF) > ((k[strongest] >> 8) & 0xFF)) {
+                        strongest = c;
+                    }
+                }
+                if (q_max - q_min > M_BUMP_SPLIT_Q) {
+                    evened = true;
+                    const uint32_t q = k[strongest] & 0xFF;
+                    for (int32_t c = 0; c < 4; c++) {
+                        // The shine's strongest corner moves with the camera,
+                        // and the piece's relief flipped about with it (a
+                        // light right over a floor): its slopes' part goes
+                        // instead.
+                        k[c] = glow ? k[c] & ~0xFF00u : (k[c] & ~0xFFu) | q;
+                    }
+                }
+            }
+            if (!behind && !evened) {
+                run = run < 0 ? col : run;
+                continue;
+            }
+            if (run >= 0) {
+                // The strip of pieces run to col - 1: their corners top and
+                // bottom in turn.
+                const int32_t n = 2 * (col - run + 1);
+                pvr_vertex_t *const out = DC_PVR_ReservePoly(n);
+                if (out == nullptr) {
+                    return true;
+                }
+                for (int32_t v = 0; v < n; v++) {
+                    const int32_t g = (row + (v & 1)) * M_N + run + (v >> 1);
+                    M_Project(
+                        &grid[g], grid_uv[g][0], grid_uv[g][1], 0xFFFFFFFFu,
+                        grid_k[g],
+                        v == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX,
+                        &out[v]);
+                }
+                DC_PVR_CommitPoly(n);
+                run = -1;
+            }
+            if (behind) {
+                continue;
             }
             pvr_vertex_t *const out = DC_PVR_ReservePoly(4);
             if (out == nullptr) {
@@ -8435,6 +9344,10 @@ typedef struct {
     int32_t page;
     int32_t step;
     uint32_t k[6];
+    // A quad's corners as M_BumpVertex gave them, before Q was evened out
+    // (corner_ok): the grid's own corners are the same points.
+    uint32_t corner_k[4];
+    bool corner_ok;
     float max_by_light;
     float z_min;
 } M_BUMP_ENTRY;
@@ -8477,12 +9390,17 @@ static void M_FlushBump(
                 glow ? DC_BLEND_BUMP_GLOW : DC_BLEND_BUMP, e->page, true);
         }
         // A face a passing light lies near is cut up, so that the light is
-        // seen to lie nearer one part of it.
+        // seen to lie nearer one part of it; and every face's shine, so that
+        // its highlight is a spot and not the whole face, and does not change
+        // its look at some distance as the camera comes and goes.
         M_BUMP_FRAME frame;
-        if (quad && e->max_by_light > M_BUMP_SPLIT_LIGHT
-            && e->z_min < M_BUMP_SPLIT_RANGE
+        if (quad
+            && (glow || (e->max_by_light > M_BUMP_SPLIT_LIGHT
+                         && e->z_min < M_BUMP_SPLIT_RANGE))
             && M_BumpFrame(bind, batcher->xverts, tri, &frame)
-            && M_EmitBumpGrid(batcher, bind, lights, &frame, tri, glow)) {
+            && M_EmitBumpGrid(
+                batcher, bind, lights, &frame, tri, glow,
+                e->corner_ok ? e->corner_k : nullptr)) {
             m_BumpFaces++;
             continue;
         }
@@ -8567,9 +9485,10 @@ static bool M_BumpCornerFill(
         scale = M_Clamp(room_total * 4.0f, 0.0f, 1.0f);
     }
     float l[3];
+    const float inv_total = room_total > 0.0f ? M_Recip(room_total) : 0.0f;
     for (int32_t r = 0; r < 3; r++) {
         const float light = room_total > 0.0f
-            ? room_pos[r] / room_total
+            ? room_pos[r] * inv_total
             : pos[r] - v[1][r] * (8.0f * WALL_L);
         l[r] = light - pos[r];
     }
@@ -8580,7 +9499,7 @@ static bool M_BumpCornerFill(
     const float lx = M_Dot3(l, f->t) * M_InvSqrt(f->tl * ll);
     const float ly = M_Dot3(l, f->bt) * M_InvSqrt(f->bl * ll);
     const float lz = M_Dot3(l, f->n) * M_InvSqrt(f->nl * ll);
-    const float off = sqrtf(MAX(1.0f - lz * lz, 0.0f));
+    const float off = M_Sqrt0(MAX(1.0f - lz * lz, 0.0f));
     const float steady = M_Clamp((off - 0.30f) * (1.0f / 0.45f), 0.0f, 1.0f);
     const float steady_smooth = steady * steady * (3.0f - 2.0f * steady);
     float q = M_Atan2(ly, lx);
@@ -8613,6 +9532,47 @@ static uint32_t M_BumpFromCache(
 }
 
 // Draws the relief of the faces of one range near the camera over them.
+// Whether a passing light's reach touches the sphere about a face's corners:
+// with none, the face gets nothing from them anywhere on it (corners, middle
+// or grid), as with no passing light at all.
+static bool M_BumpPassingNear(
+    const M_BUMP_LIGHTS *const lights, const M_XVERT *const xv,
+    const OUTPUT_MESH_INDEX *const tri, const bool quad)
+{
+    const int32_t n = quad ? 4 : 3;
+    const OUTPUT_MESH_INDEX corner[4] = { tri[0], tri[1], tri[2],
+                                          quad ? tri[5] : tri[0] };
+    float c[3] = {};
+    for (int32_t k = 0; k < n; k++) {
+        c[0] += xv[corner[k]].x;
+        c[1] += xv[corner[k]].y;
+        c[2] += xv[corner[k]].z;
+    }
+    const float inv_n = quad ? 0.25f : (1.0f / 3.0f);
+    for (int32_t r = 0; r < 3; r++) {
+        c[r] *= inv_n;
+    }
+    float face_sq = 0.0f;
+    for (int32_t k = 0; k < n; k++) {
+        const float d[3] = { xv[corner[k]].x - c[0], xv[corner[k]].y - c[1],
+                             xv[corner[k]].z - c[2] };
+        face_sq = MAX(face_sq, M_Dot3(d, d));
+    }
+    const float face = M_Sqrt0(face_sq);
+    for (int32_t l = 0; l < lights->count; l++) {
+        if (!lights->passing[l]) {
+            continue;
+        }
+        const float d[3] = { lights->pos[l][0] - c[0], lights->pos[l][1] - c[1],
+                             lights->pos[l][2] - c[2] };
+        const float reach = lights->radius[l] + face;
+        if (M_Dot3(d, d) < reach * reach) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void M_EmitBumpRange(
     MESH_BATCHER *const batcher, const M_BINDING *const bind,
     const M_BUMP_LIGHTS *const lights, const OUTPUT_MESH_INDEX *const indices,
@@ -8623,8 +9583,8 @@ static void M_EmitBumpRange(
     // The kept relief of this run's corners, by their place in the list.
     M_BUMP_CORNER *const cache =
         bind->bump_cache != nullptr ? bind->bump_cache + first : nullptr;
-    // The shade of a room whose lights are all still ones keeps most of its
-    // working out from frame to frame; the shine follows the camera.
+    // With no passing light the shade keeps most of its working out from
+    // frame to frame; the shine follows the camera.
     const bool kept = !glow && cache != nullptr && !lights->any_passing;
     const float reach =
         (glow ? M_BUMP_GLOW_RANGE : M_BUMP_RANGE) * M_BUMP_LIGHT_REACH;
@@ -8646,10 +9606,11 @@ static void M_EmitBumpRange(
             i += step;
             continue;
         }
-        // Too far for any corner to have the least relief (a passing light
-        // lights a face at any distance).
-        if (!lights->any_passing
-            && M_BumpNearCap(z_min, glow) < M_BUMP_MIN_FADE) {
+        // Too far for any corner to have the least relief, unless a passing
+        // light reaches the face (it lights a face at any distance).
+        if (M_BumpNearCap(z_min, glow) < M_BUMP_MIN_FADE
+            && !(lights->any_passing
+                 && M_BumpPassingNear(lights, xv, tri, quad))) {
             i += step;
             continue;
         }
@@ -8663,6 +9624,7 @@ static void M_EmitBumpRange(
         uint32_t q_max = 0;
         float max_by_light = 0.0f;
         bool shown = true;
+        bool per_corner = false; // k[] is M_BumpVertex at each corner
         if (!glow && z_min >= M_BUMP_FACE_FAR) {
             // So far off that its corners differ by little: the relief of
             // its middle at all of them.
@@ -8727,6 +9689,7 @@ static void M_EmitBumpRange(
         } else {
             have_frame = M_BumpFrame(bind, xv, tri, &frame);
             shown = have_frame;
+            per_corner = true;
             for (int32_t c = 0; shown && c < step; c++) {
                 int32_t same = -1;
                 for (int32_t d = 0; d < c; d++) {
@@ -8754,12 +9717,31 @@ static void M_EmitBumpRange(
             continue;
         }
         // Q is one byte that comes round from 255 to 0: a face whose corners
-        // lie either side of that, (as the one right under a light does)
-        // would run through every direction in between. It takes the middle's
+        // lie either side of that would run through every direction in
+        // between. It takes the middle's
         // direction for all its corners, and keeps their own strength: the
         // relief at a corner it shares with the next face stays what that
         // face has there, so that the two meet.
-        if (q_max - q_min > 128
+        // Unless the corners truly face apart, which is a light right over
+        // the face: then the middle's direction is rounding noise under the
+        // light, and turned about at every camera move (the relief
+        // flickered). Its slopes' part goes instead, as the light is above.
+        const uint32_t corner_k[4] = { k[0], k[1], k[2], quad ? k[5] : 0 };
+        uint32_t apart = 0;
+        for (int32_t c = 0; c < step; c++) {
+            for (int32_t d = c + 1; d < step; d++) {
+                const uint32_t a = k[c] & 0xFF;
+                const uint32_t b = k[d] & 0xFF;
+                const uint32_t diff = a > b ? a - b : b - a;
+                apart = MAX(apart, MIN(diff, 256u - diff));
+            }
+        }
+        if (apart > M_BUMP_SPLIT_Q) {
+            for (int32_t c = 0; c < step; c++) {
+                k[c] &= ~0xFF00u;
+            }
+        } else if (
+            q_max - q_min > 128
             && (have_frame || M_BumpFrame(bind, xv, tri, &frame))) {
             M_XVERT mid;
             M_BumpMid(xv, tri, quad, &mid);
@@ -8780,6 +9762,8 @@ static void M_EmitBumpRange(
         e->page = tri_page;
         e->step = step;
         memcpy(e->k, k, sizeof(k));
+        memcpy(e->corner_k, corner_k, sizeof(corner_k));
+        e->corner_ok = per_corner && quad;
         e->max_by_light = max_by_light;
         e->z_min = z_min;
         if (queued == M_BUMP_QUEUE) {
@@ -9075,6 +10059,55 @@ static void M_EmitBump(
     if (batcher->z_near > limit) {
         return;
     }
+    // A light whose reach misses the room's bounding sphere gives none of its
+    // vertices anything: let go once here, not tested at every vertex.
+    {
+        float mv[4][4];
+        float scale;
+        M_ModelView(&inst->wmatrix, mv, &scale);
+        float local[3];
+        float half_sq = 0.0f;
+        for (int32_t k = 0; k < 3; k++) {
+            const float half = (bind->bounds[1][k] - bind->bounds[0][k]) * 0.5f;
+            local[k] = bind->bounds[0][k] + half;
+            half_sq += half * half;
+        }
+        float center[3];
+        for (int32_t r = 0; r < 3; r++) {
+            center[r] = mv[0][r] * local[0] + mv[1][r] * local[1]
+                + mv[2][r] * local[2] + mv[3][r];
+        }
+        const float sphere = M_Sqrt0(half_sq) * scale;
+        int32_t kept = 0;
+        for (int32_t l = 0; l < lights.count; l++) {
+            const float d[3] = {
+                lights.pos[l][0] - center[0],
+                lights.pos[l][1] - center[1],
+                lights.pos[l][2] - center[2],
+            };
+            const float reach = lights.radius[l] + sphere;
+            if (M_Dot3(d, d) >= reach * reach) {
+                continue;
+            }
+            if (kept != l) {
+                memcpy(lights.pos[kept], lights.pos[l], sizeof(lights.pos[l]));
+                lights.radius[kept] = lights.radius[l];
+                lights.power[kept] = lights.power[l];
+                lights.passing[kept] = lights.passing[l];
+            }
+            kept++;
+        }
+        lights.count = kept;
+        // A passing light let go here lights none of the room: the room is
+        // as with none, and keeps its relief from frame to frame (M_BumpCacheSync).
+        any_passing = false;
+        for (int32_t l = 0; l < kept; l++) {
+            any_passing |= lights.passing[l];
+            lights.radius_sq[l] = lights.radius[l] * lights.radius[l];
+            lights.inv_radius_sq[l] = M_Recip(lights.radius_sq[l]);
+        }
+        lights.any_passing = any_passing;
+    }
     if (!any_passing) {
         M_BumpCacheSync(bind, M_SigMix(sig, (float)lights.count) | 1u);
     }
@@ -9089,6 +10122,11 @@ static void M_EmitBump(
         int32_t page = INT32_MIN;
         for (int32_t i = 0; i < batcher->range_count; i++) {
             const M_RANGE *const range = &batcher->ranges[i];
+            // No shine on the faces with holes (run 1): the relief has none,
+            // and its white showed through them over what lies behind.
+            if (pass == 1 && range->run == 1) {
+                continue;
+            }
             if (range->z_near <= (pass == 1 ? glow_limit : limit)) {
                 M_EmitBumpRange(
                     batcher, bind, &lights, indices + range->start,
@@ -11399,6 +12437,8 @@ void MeshBatcher_RemoveMesh(MESH_BATCHER *const batcher, OUTPUT_MESH *const mesh
     Memory_Free(bind->see_cells);
     Memory_Free(bind->see_through);
     Memory_Free(bind->wall_top);
+    Memory_Free(bind->occ_tris);
+    Memory_Free(bind->occ_pos);
     Memory_Free(bind->transp);
     if (bind->bump_cache != nullptr) {
         m_BumpCacheBytes -= sizeof(M_BUMP_CORNER) * bind->bump_count;
@@ -12987,6 +14027,14 @@ void DC_Debug_DrawRoomBoxes(void)
         if (state->rtrig > 128) {
             g_DC_NoOcclusion = !g_DC_NoOcclusion;
             LOG_INFO("occlusion %s", g_DC_NoOcclusion ? "off" : "on");
+        } else if (state->ltrig > 128) {
+            g_DC_DumpOcclusion = true;
+            g_DC_SkipRoom = g_DC_SkipRoom + 1 >= Room_DrawGetCount()
+                ? -1
+                : g_DC_SkipRoom + 1;
+            LOG_INFO(
+                "[skip] %d of %d: room %d", g_DC_SkipRoom, Room_DrawGetCount(),
+                g_DC_SkipRoom >= 0 ? Room_DrawGetRoom(g_DC_SkipRoom) : -1);
         } else {
             m_DebugRooms = !m_DebugRooms;
         }

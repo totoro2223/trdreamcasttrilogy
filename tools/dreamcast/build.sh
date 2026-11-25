@@ -34,6 +34,9 @@ BUILD_DIR="$ROOT/build/dc-$BUILD_TYPE"
 [ "${DC_PROFILE:-0}" = 1 ] && BUILD_DIR="$BUILD_DIR-prof"
 # DC_PROBES=1 (the frame timers the benchmark reports need) also has a directory.
 [ "${DC_PROBES:-0}" = 1 ] && BUILD_DIR="$BUILD_DIR-probes"
+# DC_VERIFY=1 runs the C beside the assembly it stands for and logs where they
+# differ (dc_emit_verify), in a directory of its own.
+[ "${DC_VERIFY:-0}" = 1 ] && BUILD_DIR="$BUILD_DIR-verify"
 CROSS="$ROOT/build/dc-cross.ini"
 
 win() { cygpath -m "$1"; }
@@ -114,7 +117,7 @@ want=false
 if [ "$(meson configure "$BUILD_DIR" 2>/dev/null | awk '$1 == "dc_probes" { print $2 }')" != "$want" ]; then
   meson configure "$BUILD_DIR" -Ddc_probes="$want"
 fi
-for opt in "dc_iso_dma:${DC_ISO_DMA:-0}" "dc_debug_boxes:${DC_BOXES:-0}" "dc_bg_magenta:${DC_MAGENTA:-0}" "dc_heap_census:${DC_CENSUS:-0}"; do
+for opt in "dc_iso_dma:${DC_ISO_DMA:-0}" "dc_debug_boxes:${DC_BOXES:-0}" "dc_bg_magenta:${DC_MAGENTA:-0}" "dc_heap_census:${DC_CENSUS:-0}" "dc_emit_verify:${DC_VERIFY:-0}"; do
   want=false
   [ "${opt#*:}" = 1 ] && want=true
   if [ "$(meson configure "$BUILD_DIR" 2>/dev/null | awk -v o="${opt%:*}" '$1 == o { print $2 }')" != "$want" ]; then

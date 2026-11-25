@@ -29,6 +29,8 @@ void DC_World_Tag(int32_t tag);
 void DC_World_StartRender(DC_WORLD_DRAW draw, void *arg);
 void DC_World_StopRender(void);
 bool DC_World_IsRendering(void);
+// The render thread, or nullptr: the profiler samples it too.
+struct kthread *DC_World_RenderThread(void);
 
 // A phase run inside a tick (the inventory) draws itself: the render thread
 // holds off until it is over.

@@ -1,4 +1,4 @@
-#include <trx/config.h>
+﻿#include <trx/config.h>
 #include <trx/core/log.h>
 #include <trx/core/math/geom.h>
 #include <trx/core/subsystem.h>
@@ -15,6 +15,7 @@
 #include <trx/game/output.h>
 #include <trx/core/memory.h>
 #include <trx/game/output/bind.h>
+#include <trx/game/output/sources/objects.h>
 #include <trx/game/output/sources/rooms.h>
 #include <trx/game/output/water.h>
 #include <trx/game/pathing/lot.h>
@@ -23,6 +24,7 @@
 #include <trx/game/sparks.h>
 #include <trx/game/viewport.h>
 
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
@@ -31,6 +33,10 @@
     #include <platform/dreamcast/dc_mode.h>
     #include <platform/dreamcast/dc_probe.h>
     #include <platform/dreamcast/render/shadow.h>
+// TEMP: the room of the draw list left out, or -1 (batcher.c).
+extern int32_t g_DC_SkipRoom;
+// TEMP: the next M_FindOccluded logs every portal it tries (batcher.c).
+extern bool g_DC_DumpOcclusion;
 #else
     #define DC_PROBE(i, stmt) stmt
     #define DC_PROBE_START(t)
@@ -187,10 +193,10 @@ static inline bool M_PortalFacesCamera(
 
 #if defined(__DREAMCAST__)
 static int16_t m_OcclusionQueue[MAX_ROOMS];
-
-// What the walls leave of a portal, seen from the camera: lines of sight to a
-// grid of points across it (M_SIGHT_GRID steps a side).
-#define M_SIGHT_GRID 4
+// R + up in a boxes or probes build (batcher.c): every room drawn.
+extern bool g_DC_NoOcclusion;
+extern bool g_DC_OccDump; // TEMP
+    #include <arch/timer.h> // TEMP
 
 // The eyes the walls are asked about: where the camera is, the middle of its
 // sector of the camera room's grid, and four points about the middle. What
@@ -316,107 +322,209 @@ static bool M_PointHiddenAll(const ROOM *const room, const XYZ_32 *const point)
     return true;
 }
 
-// The point of the portal at (u, v) steps of the grid, a corner of it for
-// 0 or M_SIGHT_GRID, in the portal's own space.
-static void M_PortalPoint(
-    const PORTAL *const portal, const float u, const float v, float out[3])
+// Whether a room lies wholly behind what is painted in the occlusion buffer:
+// it shows only through its portals that face away from the camera (the ways
+// in from the rooms nearer), so each of those, within its window. A portal
+// part behind the camera might show anything.
+static bool M_RoomHidden(
+    const ROOM *const room, const MATRIX *const m,
+    const OUTPUT_ROOM_BIND *const bind)
 {
-    const float fu = u / M_SIGHT_GRID;
-    const float fv = v / M_SIGHT_GRID;
-    const XYZ_16 *const p = portal->vertex;
-    const float x[4] = { p[0].x, p[1].x, p[2].x, p[3].x };
-    const float y[4] = { p[0].y, p[1].y, p[2].y, p[3].y };
-    const float z[4] = { p[0].z, p[1].z, p[2].z, p[3].z };
-    const float k[4] = { (1.0f - fu) * (1.0f - fv), fu * (1.0f - fv), fu * fv,
-                         (1.0f - fu) * fv };
-    out[0] = k[0] * x[0] + k[1] * x[1] + k[2] * x[2] + k[3] * x[3];
-    out[1] = k[0] * y[0] + k[1] * y[1] + k[2] * y[2] + k[3] * y[3];
-    out[2] = k[0] * z[0] + k[1] * z[1] + k[2] * z[2] + k[3] * z[3];
-}
-
-static bool M_GridPointHidden(
-    const ROOM *const room, const PORTAL *const portal, const int32_t iu,
-    const int32_t iv)
-{
-    float local[3];
-    M_PortalPoint(portal, (float)iu, (float)iv, local);
-    const XYZ_32 world = {
-        .x = room->pos.x + (int32_t)local[0],
-        .y = room->pos.y + (int32_t)local[1],
-        .z = room->pos.z + (int32_t)local[2],
-    };
-    return M_PointHiddenAll(room, &world);
-}
-
-// Whether the portal is hidden: its grid of points, each behind a wall of the
-// room the portal is in or of the camera's, from every eye. Only all of them
-// hidden hides it. Worked out once for each sector the camera is in.
-static bool M_PortalHidden(const ROOM *const room, const PORTAL *const portal)
-{
-    bool found;
-    M_SEE_ENTRY *const entry = M_SeeSlot(portal, &found);
-    if (found) {
-        return entry->hidden;
+    if (room->portals == nullptr) {
+        return false;
     }
-    g_DC_ProbeUs[DC_PROBE_C_PTEST]++; // TEMP
-
-    // Every point of the grid, the first one seen showing it: a wide portal
-    // (the hills of an open room) can lie open between a few that are hidden.
-    bool all_hidden = true;
-    for (int32_t iu = 0; iu <= M_SIGHT_GRID && all_hidden; iu++) {
-        for (int32_t iv = 0; iv <= M_SIGHT_GRID && all_hidden; iv++) {
-            all_hidden = M_GridPointHidden(room, portal, iu, iv);
+    // The matrix in floats once (its terms are 64-bit integers).
+    float f[3][4];
+    bool have_f = false;
+    int32_t tested = 0;
+    for (int32_t i = 0; i < room->portals->count; i++) {
+        const PORTAL *const portal = &room->portals->portal[i];
+        if (M_PortalFacesCamera(room, portal)) {
+            continue;
         }
+        if (!have_f) {
+            have_f = true;
+            const int64_t *const mi = &m->_00;
+            for (int32_t r = 0; r < 3; r++) {
+                for (int32_t c = 0; c < 4; c++) {
+                    f[r][c] = (float)mi[r * 4 + c];
+                }
+            }
+        }
+        float v[4][3];
+        int32_t behind = 0;
+        for (int32_t k = 0; k < 4; k++) {
+            const float px = portal->vertex[k].x;
+            const float py = portal->vertex[k].y;
+            const float pz = portal->vertex[k].z;
+            for (int32_t r = 0; r < 3; r++) {
+                v[k][r] = px * f[r][0] + py * f[r][1] + pz * f[r][2] + f[r][3];
+            }
+            behind += v[k][2] <= 0.0f;
+        }
+        if (behind == 4) {
+            continue;
+        }
+        if (behind > 0
+            || !DC_Occl_PortalHidden(
+                v, bind->bound_left, bind->bound_top, bind->bound_right,
+                bind->bound_bottom)) {
+            return false;
+        }
+        tested++;
     }
-    if (all_hidden) {
-        g_DC_ProbeUs[DC_PROBE_C_PHIDE]++; // TEMP
-    }
-    if (entry != nullptr) {
-        entry->hidden = all_hidden;
-    }
-    return all_hidden;
+    return tested > 0;
 }
 
-// Marks the rooms of the list that no portal leads to unless a wall hides it
-// from the camera (each portal facing the camera, from a room that shows):
-// the list stays as it is, for what else reads it, but their geometry is not
-// drawn.
+// How many portals from the camera a room may be and still paint the
+// occlusion buffer: the near rooms hide most, and the far ones cost as much.
+#define M_OCC_PAINT_DEPTH 2
+
+// Marks the rooms of the list that are hidden: walked from the camera's room
+// through the portals that face the camera, nearest first, each room that
+// shows paints its big opaque faces into the occlusion buffer, and a room
+// whose window (its bounds) lies wholly behind what is painted there is not
+// drawn, nor walked through. The list stays as it is, for what else reads it.
 static void M_FindOccluded(const int16_t camera_room)
 {
+    static uint32_t stamp = 0;
+    static uint32_t queued[MAX_ROOMS];
+    static uint8_t depth[MAX_ROOMS];
     const int32_t count = Room_DrawGetCount();
+    // After a pass that hid nothing the next few are let go, everything
+    // drawn as without it: an open view pays for it one frame in 8.
+    static int32_t idle = 0;
+    bool off = g_DC_NoOcclusion || g_MatrixWorldOnly;
+    if (!off && idle > 0) {
+        idle--;
+        off = true;
+    }
     for (int32_t i = 0; i < count; i++) {
-        Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(i)))->occluded = true;
+        Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(i)))->occluded = !off;
     }
     Output_Bind_GetRoom(Room_Get(camera_room))->occluded = false;
+    if (off) {
+        return;
+    }
+    stamp++;
+    const uint64_t occ_t0 = timer_us_gettime64(); // TEMP
+    DC_Occl_Begin(
+        Viewport_GetMinX(VIEWPORT_GAME), Viewport_GetMinY(VIEWPORT_GAME),
+        Viewport_GetMaxX(VIEWPORT_GAME), Viewport_GetMaxY(VIEWPORT_GAME),
+        Viewport_GetCenterX(VIEWPORT_GAME), Viewport_GetCenterY(VIEWPORT_GAME),
+        g_PhdPersp);
     int32_t head = 0;
     int32_t tail = 0;
     m_OcclusionQueue[tail++] = camera_room;
+    queued[camera_room] = stamp;
+    depth[camera_room] = 0;
     while (head < tail) {
         const int16_t room_num = m_OcclusionQueue[head++];
         const ROOM *const room = Room_Get(room_num);
+        Matrix_Push();
+        Matrix_TranslateAbs32(room->pos);
+        const MATRIX m = *g_MatrixPtr;
+        Matrix_Pop();
+        OUTPUT_ROOM_BIND *const bind = Output_Bind_GetRoom(room);
+        g_DC_OccDump = g_DC_DumpOcclusion;
+        if (g_DC_DumpOcclusion) {
+            LOG_INFO("[occl] room %d depth %d", room_num, depth[room_num]);
+        }
+        if (room_num != camera_room) {
+            if (M_RoomHidden(room, &m, bind)) {
+                continue;
+            }
+            bind->occluded = false;
+        }
+        if (depth[room_num] <= M_OCC_PAINT_DEPTH) {
+            OutputSource_Rooms_OcclAdd(
+                room, &m, bind->bound_left, bind->bound_top, bind->bound_right,
+                bind->bound_bottom);
+            // Its statics too (trees, rocks): those merged into the room's
+            // mesh painted with it.
+            for (int32_t j = 0; j < room->num_static_meshes; j++) {
+                const STATIC_MESH *const sm = &room->static_meshes[j];
+                const STATIC_OBJECT_3D *const obj =
+                    Object_Get3DStatic(sm->static_num);
+                const bool merged = OutputSource_Rooms_IsStaticMerged(sm->draw_num);
+                if (g_DC_DumpOcclusion) { // TEMP
+                    LOG_INFO(
+                        "[occl]  static %d num %d merged %d visible %d at "
+                        "%d,%d,%d",
+                        sm->draw_num, sm->static_num, merged, obj->visible,
+                        sm->pos.x, sm->pos.y, sm->pos.z);
+                }
+                if (merged || !obj->loaded || !obj->visible) {
+                    continue;
+                }
+                Matrix_Push();
+                Matrix_TranslateAbs32(sm->pos);
+                Matrix_RotY(sm->rot.y);
+                const MATRIX sm_m = *g_MatrixPtr;
+                Matrix_Pop();
+                OutputSource_Objects_OcclAdd(
+                    obj->mesh_idx, &sm_m, bind->bound_left, bind->bound_top,
+                    bind->bound_right, bind->bound_bottom);
+            }
+        }
         if (room->portals == nullptr) {
             continue;
         }
         for (int32_t i = 0; i < room->portals->count; i++) {
             const PORTAL *const portal = &room->portals->portal[i];
-            if (!M_PortalFacesCamera(room, portal)) {
+            if (queued[portal->room_num] == stamp || tail >= MAX_ROOMS
+                || !Output_Bind_GetRoom(Room_Get(portal->room_num))->drawn
+                || !M_PortalFacesCamera(room, portal)) {
                 continue;
             }
-            OUTPUT_ROOM_BIND *const to =
-                Output_Bind_GetRoom(Room_Get(portal->room_num));
-            if (!to->occluded || !to->drawn || tail >= MAX_ROOMS
-                || M_PortalHidden(room, portal)) {
-                continue;
-            }
-            to->occluded = false;
+            queued[portal->room_num] = stamp;
+            depth[portal->room_num] = (uint8_t)MIN(255, depth[room_num] + 1);
             m_OcclusionQueue[tail++] = portal->room_num;
         }
+    }
+    // TEMP: what it costs and hides, every 120 frames.
+    static uint32_t occ_us = 0;
+    static uint32_t occ_frames = 0;
+    static uint32_t occ_hidden = 0;
+    static uint32_t occ_rooms = 0;
+    occ_us += (uint32_t)(timer_us_gettime64() - occ_t0);
+    occ_rooms += count;
+    for (int32_t i = 0; i < count; i++) {
+        occ_hidden += Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(i)))->occluded;
+    }
+    {
+        int32_t hidden = 0;
+        for (int32_t i = 0; i < count; i++) {
+            hidden += Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(i)))->occluded;
+        }
+        if (hidden == 0) {
+            idle = 7;
+        }
+    }
+    if (++occ_frames == 120) {
+        extern uint32_t g_DC_OccStats[10];
+        LOG_INFO(
+            "[occl] %u us a frame, %u of %u rooms hidden; %u rooms paint, %u "
+            "verts, %u painted, %u cells; add %u us, paint %u us (tris %u, in %u), begin %u us",
+            occ_us / 120, occ_hidden / 120, occ_rooms / 120,
+            g_DC_OccStats[3] / 120, g_DC_OccStats[0] / 120,
+            g_DC_OccStats[1] / 120, g_DC_OccStats[2] / 120,
+            g_DC_OccStats[4] / 120, g_DC_OccStats[5] / 120,
+            g_DC_OccStats[8] / 120, g_DC_OccStats[9] / 120,
+            g_DC_OccStats[6] / 120);
+        memset(g_DC_OccStats, 0, sizeof(g_DC_OccStats));
+        occ_us = occ_frames = occ_hidden = occ_rooms = 0;
     }
     for (int32_t i = 0; i < count; i++) {
         if (Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(i)))->occluded) {
             g_DC_ProbeUs[DC_PROBE_C_ROOMS]++; // TEMP
+            if (g_DC_DumpOcclusion) {
+                LOG_INFO("[occl] room %d occluded", Room_DrawGetRoom(i));
+            }
         }
     }
+    g_DC_DumpOcclusion = false;
+    g_DC_OccDump = false;
 }
 
 // Whether the walls hide an object whose box is a column of the given radius
@@ -1270,6 +1378,12 @@ void Room_DrawAllRooms(const int16_t current_room, const int16_t target_room)
     DC_PROBE(DC_PROBE_S_BOUNDS, M_GetBounds());
 #if defined(__DREAMCAST__)
     M_FindOccluded(current_room);
+    // TEMP: one room of the list left out (L + up in the boxes build), to see
+    // whether it shows at all.
+    if (g_DC_SkipRoom >= 0 && g_DC_SkipRoom < Room_DrawGetCount()) {
+        Output_Bind_GetRoom(Room_Get(Room_DrawGetRoom(g_DC_SkipRoom)))->occluded =
+            true;
+    }
 #endif
 
     if (m_Outside) {

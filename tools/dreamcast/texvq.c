@@ -63,10 +63,6 @@ typedef struct {
     uint16_t texels[PAGE_SIZE];
     uint8_t vq[VQ_BYTES];
     uint8_t mip[MIP_BYTES];
-    // A level's room faces use it (mip_ok), and no face or sprite of any
-    // level draws it with alpha, nor an injection holds it (mip_no).
-    int mip_ok;
-    int mip_no;
 } PAGE;
 
 static PAGE *m_Pages = NULL;
@@ -100,7 +96,6 @@ typedef struct {
     TEXTURE *textures;
     int32_t count;
     // The pages sprites use (a bit a page, the first 256).
-    uint8_t sprite_pages[32];
 } LEVEL;
 
 static LEVEL m_Level;
@@ -129,52 +124,9 @@ static int AddPage(const uint16_t *const texels, const uint32_t format)
     PAGE *const page = &m_Pages[m_Count++];
     page->hash = hash;
     page->format = format;
-    page->mip_ok = 0;
-    page->mip_no = 0;
     memcpy(page->texels, texels, PAGE_SIZE * 2);
     return m_Count - 1;
 }
-
-// Whether a level page may keep its mipmaps: some room face draws from it,
-// and no texture (draw type other than 0, opaque) nor sprite uses it with
-// alpha. Without the level's textures read, none may.
-static void MarkMip(
-    const int index, const int32_t level_page, const uint16_t *const texels)
-{
-    if (m_Level.count <= 0) {
-        m_Pages[index].mip_no = 1;
-        return;
-    }
-    int room = 0;
-    int alpha = level_page < 256
-        && (m_Level.sprite_pages[level_page >> 3] & (1 << (level_page & 7)));
-    for (int32_t i = 0; i < m_Level.count; i++) {
-        const TEXTURE *const t = &m_Level.textures[i];
-        if (t->page != level_page) {
-            continue;
-        }
-        room |= m_Level.used[i] != 0;
-        alpha |= t->draw != 0;
-        // A see-through texel under an opaque texture still makes the game
-        // cut it out (punch-through).
-        int u0 = 255, v0 = 255, u1 = 0, v1 = 0;
-        for (int k = 0; k < t->corners; k++) {
-            const int u = t->u[k] >> 8, v = t->v[k] >> 8;
-            u0 = u < u0 ? u : u0;
-            u1 = u > u1 ? u : u1;
-            v0 = v < v0 ? v : v0;
-            v1 = v > v1 ? v : v1;
-        }
-        for (int v = v0; v <= v1 && !alpha; v++) {
-            for (int u = u0; u <= u1 && !alpha; u++) {
-                alpha = (texels[v * PAGE_W + u] & 0x8000) == 0;
-            }
-        }
-    }
-    m_Pages[index].mip_ok |= room;
-    m_Pages[index].mip_no |= alpha;
-}
-
 
 // As texture_pages_16.h does it.
 static uint16_t ToARGB1555(const uint8_t *const c)
@@ -202,9 +154,7 @@ static void AddRGBAPage(const uint8_t *const rgba)
     for (int i = 0; i < PAGE_SIZE; i++) {
         texels[i] = format ? ToARGB4444(&rgba[i * 4]) : ToARGB1555(&rgba[i * 4]);
     }
-    // (AddPage may move m_Pages: the index first.)
-    const int index = AddPage(texels, format);
-    m_Pages[index].mip_no = 1;
+    AddPage(texels, format);
 }
 
 static uint8_t *ReadFile(const char *const path, size_t *const size)
@@ -283,18 +233,11 @@ static void SkipArrU16(CURSOR *const c, const int64_t item)
     CursorSkip(c, (int64_t)CursorU16(c) * item);
 }
 
-// The sprite textures (16 bytes, the page first), noting their pages.
+// The sprite textures (16 bytes each), skipped.
 static void ReadSprites(CURSOR *const c)
 {
-    memset(m_Level.sprite_pages, 0, sizeof(m_Level.sprite_pages));
     const int32_t count = CursorS32(c);
-    for (int32_t i = 0; i < count && !c->bad; i++) {
-        const int32_t page = CursorU16(c);
-        CursorSkip(c, 14);
-        if (page < 256) {
-            m_Level.sprite_pages[page >> 3] |= 1 << (page & 7);
-        }
-    }
+    CursorSkip(c, (int64_t)count * 16);
 }
 
 // The rooms, noting the textures their faces use (sections/rooms.c): each
@@ -512,7 +455,7 @@ static void ReadLevel(
     for (int32_t i = 0; i < count; i++) {
         uint16_t texels[PAGE_SIZE];
         memcpy(texels, data + pages_16 + (size_t)i * PAGE_SIZE * 2, sizeof(texels));
-        MarkMip(AddPage(texels, 0), i, texels);
+        AddPage(texels, 0);
         AddBump(i, texels);
     }
 }
@@ -571,7 +514,7 @@ static void ReadLevelTR1(const uint8_t *const data, const size_t size)
                                       rgb[index][2], index == 0 ? 0 : 255 };
             texels[j] = ToARGB1555(rgba);
         }
-        MarkMip(AddPage(texels, 0), i, texels);
+        AddPage(texels, 0);
         AddBump(i, texels);
     }
 }
@@ -1257,16 +1200,13 @@ int main(int argc, char **argv)
     for (int i = 0; i < m_Count; i++) {
         Compress(&m_Pages[i]);
     }
-    // Only the pages of the rooms that nothing draws with alpha keep their
-    // mipmaps (bit 31 of the position marks the others): with alpha, Flycast
-    // drew them corrupt (29/10/2026: Lara, the font, the passport).
+    // Every page keeps its mipmaps. (Until 11/2026 bit 31 of the position
+    // left out those drawn with alpha, which Flycast showed corrupt: the
+    // game read their texels without skipping the small levels.)
     uint32_t (*const index)[2] = malloc(sizeof(*index) * m_Count);
-    int opaque = 0;
     for (int i = 0; i < m_Count; i++) {
-        const bool solid = m_Pages[i].mip_ok && !m_Pages[i].mip_no;
-        opaque += solid;
         index[i][0] = m_Pages[i].hash;
-        index[i][1] = (uint32_t)i | (solid ? 0u : 0x80000000u);
+        index[i][1] = (uint32_t)i;
     }
     qsort(index, m_Count, sizeof(*index), CompareHash);
 
@@ -1280,7 +1220,7 @@ int main(int argc, char **argv)
     const char *const mip_env = getenv("TRX_MIP");
     const bool no_mip = mip_env != NULL && strcmp(mip_env, "0") == 0;
     if (!no_mip) {
-        printf("texvq: %d of %d pages with mipmaps\n", opaque, m_Count);
+        printf("texvq: %d pages with mipmaps\n", m_Count);
     }
     fwrite(no_mip ? "TVQ1" : "TVQ2", 1, 4, fp);
     fwrite(&count, 4, 1, fp);

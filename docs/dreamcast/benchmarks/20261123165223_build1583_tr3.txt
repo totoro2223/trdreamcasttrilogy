@@ -1,0 +1,140 @@
+﻿date 2026-11-23 16:52:23
+build DC build 1583
+game tr3
+demo 0
+mode 0 (640x480), shadows 5, bump 1, 30 fps
+frames 1618 in 73516 ms
+fps avg 22.0, min 3.6, best frame 14.3 ms
+frame ms: median 41, 99% under 143, worst 272.3
+frames over 35 ms: 1137 (70%)
+per frame, average / worst (ms, or counts and KiB):
+  logic  4.8 / 173.1
+  stage  8.0 / 34.3
+  pass   26.3 / 169.3
+  submit 1.0 / 27.3
+  map    2.1 / 14.6
+  mwait  0.0 / 0.0
+  wait   0.0 / 0.0
+  pvr    7.6 / 13.7
+  polys  1027 / 2180
+  inst   30 / 58
+  verts  5684 / 14366
+  OP     54 / 149 KiB
+  TR     83 / 203 KiB
+  PT     26 / 36 KiB
+  MOD    0 / 0 KiB
+  xform  5.0 / 17.4
+probes, average per frame (us or counts):
+  ev=22 lua=0 rem=236 inp=172 items=801 fx=520 lara=1367 post=655 end=59 ctrl=0 mctl=4647
+  flip=0 log=1 tcyc=1 tuvw=0 tcomp=49 vroom=3089 vobj=2577 vgen=17 soft=1307 emit=3301
+  cel=310 bump=14487 envp=0 sscene=3346 spre=541 sbounds=78 ssky=0 sroom=41 sstat=38
+  sitem=527 slara=1485 sfx=564 spaint=0 sgflush=25540 sui=3644 soflush=820 nrooms=3
+  llight=34 lshadow=1 lmesh=286 lwater=153 ljoint=21 lhair=328 lequip=50 lblend=108
+  troom=2154 tplain=1918 tgen=51 gown=17 genv=0 gfog=0 gbill=0 goth=0 equad=20 etri=1
+  eclip=42 eout=1 eback=27 msil=1827 mend=211 src0=25265 src1=0 src2=0 src3=761 src4=0
+  src5=0 src6=0 src7=0 src8=0 src9=0 plprep=68 pvol=222 ppsoft=40 pdrawi=24933 ptransp=51
+  pntransp=5 udraw=2087 uops=0 ilight=31 lweld=0 aruns=157 afaces=2336 acfaces=41 aempty=41
+  rall=3089 rplain=0 rdyn=0 rflick=0 rvary=46 rnw=3043 rfog=0 rhit=2051 ctest=0 chide=0
+  croom=0 qtest=0 qhide=0 otest=4 ohide=0 otime=8 ectl=460 ectln=0 edraw=200 edrawn=0
+  ownf=17 owns=0 groom=0 gobj=0 gfogc=0 genvc=0 gother=0 iwalk=67 imesh=127 eclipc=0
+  ebackc=0 dpre=80 dpost=1350 dtail=14905 sefr=18 sfxm=174 sspk=382 srope=2 sflare=1
+  mphase=3863 mlua=49 mbegin=17 mevict=3 ltarget=43 lsmash=1 lhairc=376
+frame length histogram (ms: frames):
+  14:1 18:1 20:1 21:4 22:1 23:1 24:11 25:18 26:17 27:26 28:31 29:122 30:96 31:35 32:43
+  33:29 34:44 35:60 36:44 37:45 38:48 39:104 40:107 41:64 42:50 43:56 44:33 45:42 46:27
+  47:38 48:41 49:39 50:36 51:40 52:27 53:23 54:19 55:10 56:8 57:6 58:8 59:4 60:3 61:6 62:3
+  63:2 64:9 65:1 66:2 67:5 68:2 69:2 70:3 71:2 72:2 74:2 75:2 76:4 78:2 79:1 80:2 81:2 82:2
+  83:1 86:1 88:1 90:2 91:1 93:3 94:3 95:1 97:2 98:1 100:1 101:1 102:3 103:3 104:2 105:2
+  106:1 107:4 108:5 109:2 112:1 113:2 114:1 115:3 116:3 117:3 118:2 119:2 120:1 121:2 122:4
+  123:2 124:1 125:3 126:1 129:2 130:1 131:1 133:1 138:1 139:3 140:2 142:1 144:1 145:1 146:1
+  149:5 150:1 162:1 164:1 168:1 176:1 198:1 >200:2
+frame length by frame (ms), 24 a line, from the middle:
+ 0761: 35 35 36 34 34 35 35 35 35 36 47 41 36 36 33 34 34 34 34 35 35 35 34 34
+ 0785: 34 35 35 37 35 37 36 46 37 36 39 37 37 40 79 40 35 35 35 36 37 38 37 40
+ 0809: 37 37 38 38 59 38 35 34 35 56 42 42 47 48 47 44 40 36 138 149 45 51 39 40
+ 0833: 40 49 49 168 198 129 255 123 108 94 115 121 116 113 118 115 119 133 102 120 122 139 131 139
+ logic (1/4 ms) from frame 809: 10 10 9 9 10 19 9 9 11 49 37 35 52 37 50 38 27 13 25 52 51 25 12 14
+ stage (1/4 ms) from frame 809: 27 27 27 27 36 30 27 27 27 28 28 27 27 32 29 27 29 29 29 28 29 35 34 35
+ pass (1/4 ms) from frame 809: 102 103 105 104 180 92 93 93 93 137 96 95 101 112 100 99 95 92 255 255 92 135 100 104
+ map (1/4 ms) from frame 809: 7 7 7 7 7 7 7 7 7 7 6 7 6 7 7 7 7 7 10 7 7 7 6 6
+ frame (ms) from frame 809: 37 37 38 38 59 38 35 34 35 56 42 42 47 48 47 44 40 36 138 149 45 51 39 40
+worst frames (60 ms or more), worst first, times in tenths of ms; under each, the probes over 1 ms:
+ #840 272ms logic 1731 stage 132 pass 637 submit 195 map 26 mwait 0 wait 0 pvr 75 polys 2039 inst 45 verts 9660
+    items=13051 fx=1723 lara=11250 post=1645 mctl=171198 vroom=6208 vobj=3452 soft=2930
+    emit=5495 bump=44541 sscene=24161 sitem=1711 slara=1245 sgflush=62994 sui=5813 troom=4454
+    tplain=2514 msil=2330 src0=62796 pdrawi=62314 udraw=2148 afaces=4264 rall=6208 rnw=6208
+    rhit=4250 ectl=12139 dpost=2988 dtail=45087 mphase=29172
+ #960 200ms logic 134 stage 343 pass 1486 submit 13 map 25 mwait 0 wait 0 pvr 75 polys 1862 inst 43 verts 9162
+    items=3201 fx=1539 lara=4190 post=1271 mctl=11496 vroom=5852 vobj=3310 soft=13697
+    emit=15217 bump=109197 sscene=5891 sitem=2035 slara=11566 sgflush=147698 sui=16469
+    lhair=10318 troom=4287 tplain=2392 msil=2266 src0=147498 pdrawi=147071 udraw=2288
+    afaces=3957 rall=5852 rnw=5852 rhit=3986 ectl=2027 dpost=13757 dtail=109731 mphase=11287
+ #838 198ms logic 161 stage 103 pass 1693 submit 12 map 17 mwait 0 wait 0 pvr 75 polys 1787 inst 35 verts 8518
+    items=3886 fx=2223 lara=5639 post=2127 mctl=16022 vroom=5568 vobj=2950 emit=4685
+    bump=151735 sscene=2942 sitem=1094 slara=1233 sgflush=168394 sui=3819 troom=6401
+    tplain=2219 msil=1568 src0=168196 pdrawi=167754 udraw=2227 afaces=3731 rall=5568 rnw=5568
+    rhit=3834 ectl=2746 dtail=152228 mphase=15707 lhairc=1352
+ #888 176ms logic 156 stage 260 pass 1122 submit 195 map 25 mwait 0 wait 0 pvr 75 polys 2100 inst 56 verts 10946
+    items=3805 fx=2952 lara=5202 post=1811 mctl=15522 vroom=7230 vobj=3716 soft=5046 emit=6776
+    bump=80378 sscene=22288 sitem=13452 slara=5590 sfx=1419 sgflush=111320 sui=3936 troom=12760
+    tplain=2748 msil=2241 src0=111122 pdrawi=110526 udraw=2312 afaces=4791 rall=7230 rnw=7230
+    rhit=4891 ectl=2421 dpost=5116 dtail=80893 sspk=1240 mphase=15245 lhairc=1037
+ #837 168ms logic 65 stage 94 pass 1496 submit 9 map 17 mwait 0 wait 0 pvr 75 polys 1353 inst 27 verts 7768
+    items=1626 lara=2211 mctl=6429 vroom=5412 vobj=2356 emit=3884 bump=136590 sscene=2749
+    slara=1683 sgflush=148777 sui=3673 troom=3822 tplain=1717 msil=1551 src0=148615
+    pdrawi=148249 udraw=2148 afaces=3369 rall=5412 rnw=5412 rhit=3740 ectl=1170 dtail=137025
+    mphase=6301
+ #961 164ms logic 715 stage 112 pass 776 submit 13 map 25 mwait 0 wait 0 pvr 75 polys 1838 inst 41 verts 7870
+    rem=1038 items=6290 fx=13108 lara=7831 post=2504 mctl=71382 vroom=4584 vobj=3286 soft=3701
+    emit=4768 bump=59733 sscene=4033 sitem=1873 slara=1557 sgflush=76749 sui=3938 troom=3366
+    tplain=2353 msil=2275 src0=76550 pdrawi=76091 udraw=2333 afaces=3344 rall=4584 rnw=4584
+    rhit=3157 ectl=3997 dpost=3763 dtail=60256 mphase=32062 ltarget=1518 lhairc=1804
+ #576 162ms logic 45 stage 125 pass 1429 submit 9 map 18 mwait 0 wait 0 pvr 75 polys 1185 inst 27 verts 4210
+    lara=1804 mctl=4439 vroom=1854 vobj=2356 emit=2958 bump=133204 sscene=2863 sitem=5833
+    slara=1271 sgflush=142073 sui=3640 troom=1508 tplain=1718 msil=1600 src0=141915
+    pdrawi=141491 udraw=2118 afaces=1538 rall=1854 rnw=1854 rhit=1279 imesh=5313 dtail=133665
+    mphase=4311
+ #887 150ms logic 192 stage 159 pass 926 submit 195 map 27 mwait 0 wait 0 pvr 75 polys 2102 inst 56 verts 10946
+    items=4614 fx=3684 lara=6419 post=2188 mctl=19115 vroom=7230 vobj=3716 soft=4096 emit=6869
+    bump=69396 sscene=22520 sitem=2439 slara=1273 sfx=3920 sgflush=91772 sui=3953 troom=5048
+    tplain=2751 msil=2441 src0=91575 pdrawi=90978 udraw=2329 afaces=4797 rall=7230 rnw=7230
+    rhit=4891 ectl=2752 dpost=4171 dtail=69917 sspk=3760 mphase=18771 ltarget=1183 lhairc=1120
+ #601 149ms logic 1159 stage 71 pass 239 submit 7 map 17 mwait 0 wait 0 pvr 75 polys 1016 inst 27 verts 4246
+    lara=11752 post=1101 mctl=115819 vroom=1906 vobj=2340 emit=2433 bump=14863 sscene=2717
+    slara=1224 sgflush=23111 sui=3669 troom=1333 tplain=1694 msil=1563 src0=22952 pdrawi=22550
+    udraw=2147 afaces=1609 rall=1906 rnw=1906 rhit=1304 dtail=15307 mphase=14444
+ #889 149ms logic 205 stage 103 pass 964 submit 195 map 25 mwait 0 wait 0 pvr 75 polys 2099 inst 56 verts 11578
+    items=4811 fx=3671 lara=7487 post=2206 mctl=20389 vroom=7880 vobj=3698 soft=5273 emit=7096
+    bump=71152 sscene=22305 sitem=2184 slara=1287 sfx=1317 sgflush=95613 sui=3775 troom=5560
+    tplain=2814 msil=2265 src0=95415 pdrawi=94817 udraw=2220 afaces=5075 rall=7880 rnw=7880
+    rhit=5277 ectl=2993 dpost=5353 dtail=71667 sspk=1145 mphase=20045 ltarget=1200 lhairc=1414
+ #1561 149ms logic 1038 stage 85 pass 335 submit 8 map 26 mwait 0 wait 0 pvr 75 polys 1308 inst 41 verts 7882
+    items=13983 fx=2969 lara=1785 mctl=103690 vroom=4566 vobj=3316 soft=1573 emit=3924
+    bump=18545 sscene=3649 slara=1561 sfx=1238 sgflush=32671 sui=3753 troom=3175 tplain=2460
+    msil=2341 src0=32473 pdrawi=31812 udraw=2193 afaces=3280 rall=4566 rnw=4566 rhit=2989
+    ectl=13526 dpost=1629 dtail=19025 sspk=1116 mphase=20388
+ #829 149ms logic 131 stage 72 pass 1265 submit 6 map 17 mwait 0 wait 0 pvr 75 polys 870 inst 27 verts 4776
+    items=3188 fx=1652 lara=4592 post=1781 mctl=13031 vroom=2420 vobj=2356 emit=2410
+    bump=117070 sscene=2597 slara=1283 sgflush=125669 sui=3841 troom=1869 tplain=1717 msil=1555
+    src0=125508 pdrawi=125142 udraw=2250 afaces=1889 rall=2420 rnw=2420 rhit=1709 ectl=2277
+    dtail=117449 mphase=12776 lhairc=1153
+ #893 149ms logic 159 stage 102 pass 930 submit 273 map 25 mwait 0 wait 0 pvr 98 polys 2058 inst 58 verts 10836
+    items=3533 fx=2681 lara=5669 post=2177 mctl=15883 vroom=7006 vobj=3698 soft=5591 emit=6789
+    bump=67752 sscene=4097 sitem=2092 slara=1227 sfx=1259 sgflush=92186 sui=3952 troom=5312
+    tplain=2771 msil=2255 src0=91979 pdrawi=91409 udraw=2330 afaces=4681 rall=7006 rnw=7006
+    rhit=4753 ectl=2159 dpost=5668 dtail=68343 sspk=1106 mphase=15604
+ #1142 146ms logic 57 stage 81 pass 1307 submit 6 map 16 mwait 0 wait 0 pvr 75 polys 1010 inst 26 verts 7442
+    items=1534 lara=1770 mctl=5599 vroom=5130 vobj=2312 soft=1749 emit=3378 bump=118511
+    sscene=2488 slara=1216 sgflush=129819 sui=3721 troom=2739 tplain=1610 msil=1473 src0=129658
+    pdrawi=129502 udraw=2169 afaces=3107 rall=5130 rnw=5130 rhit=3386 ectl=1077 dpost=1783
+    dtail=118891 mphase=5465
+ #891 145ms logic 167 stage 111 pass 955 submit 195 map 25 mwait 0 wait 0 pvr 75 polys 2075 inst 57 verts 11596
+    items=3688 fx=3149 lara=6168 post=1797 mctl=16615 vroom=7880 vobj=3716 soft=5776 emit=7003
+    bump=69753 sscene=4093 sitem=2518 slara=1574 sfx=1464 sgflush=94710 sui=3952 troom=5642
+    tplain=2786 msil=2280 src0=94510 pdrawi=93920 udraw=2330 afaces=5090 rall=7880 rnw=7880
+    rhit=5277 ectl=2263 dpost=5857 dtail=70262 sspk=1279 mphase=16339 lhairc=1214
+ #384 144ms logic 18 stage 64 pass 1190 submit 5 map 17 mwait 0 wait 0 pvr 75 polys 852 inst 27 verts 3197
+    mctl=1743 vobj=2312 emit=2460 bump=111223 sscene=2483 slara=1223 sgflush=118221 sui=3613
+    tplain=1625 msil=1521 src0=118064 pdrawi=117834 udraw=2108 afaces=1292 dtail=111661
+    mphase=1680
+summary: BENCH 1618 frames  avg 22.0 fps  min 3.6  slow 70% | logic 4.8 stage 8.0 pass 26.3 map 2.1 pvr 7.6 ms

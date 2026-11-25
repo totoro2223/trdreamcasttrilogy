@@ -1111,6 +1111,11 @@ void Sparks_Draw(void)
 
 void Sparks_DetachEffect(const int16_t effect_num)
 {
+    // An item or effect can go before the level's sparks are made
+    // (Sparks_Reset): there are none to let go of then.
+    if (m_Sparks == nullptr) {
+        return;
+    }
     for (int32_t i = 0; i < M_MAX_SPARKS; i++) {
         SPARK *const spark = &m_Sparks[i];
         if (!spark->on) {
@@ -1135,6 +1140,11 @@ void Sparks_DetachEffect(const int16_t effect_num)
 
 void Sparks_DetachItem(const int16_t item_num)
 {
+    // An item or effect can go before the level's sparks are made
+    // (Sparks_Reset): there are none to let go of then.
+    if (m_Sparks == nullptr) {
+        return;
+    }
     for (int32_t i = 0; i < M_MAX_SPARKS; i++) {
         SPARK *const spark = &m_Sparks[i];
         if (!spark->on) {

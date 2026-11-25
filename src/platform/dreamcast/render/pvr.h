@@ -233,6 +233,9 @@ void DC_PVR_SetState(DC_BLEND blend, int32_t page, bool depth_test);
 // DC_PVR_Quad make.
 struct pvr_vertex;
 struct pvr_vertex *DC_PVR_ReservePoly(int32_t count);
+// What the relief may still write in the current list this frame (it leaves
+// room for the faces after it, and takes no spill).
+size_t DC_PVR_ReliefRoom(void);
 void DC_PVR_CommitPoly(int32_t count);
 // Polygons written outside, as a run (render/emit_sh4.S): where they go and
 // how much room there is, or nullptr for none; header says whether the list

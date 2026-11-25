@@ -223,6 +223,12 @@ static void M_IKUpdate(const ITEM *const item, const ANIM_BONE *const bone)
     }
 }
 
+// How far Leg IK lowers her body; the braid hangs from the lowered head.
+int32_t Lara_Draw_GetIKDrop(void)
+{
+    return m_IKDropUnits;
+}
+
 // The extra pitch IK gives a mesh, after its own rotation.
 static void M_IKApply(const LARA_MESH mesh, const bool interpolated)
 {

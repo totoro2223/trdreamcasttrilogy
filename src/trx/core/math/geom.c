@@ -21,7 +21,12 @@ static void M_Turn(
 #if defined(__DREAMCAST__)
     // In assembly (game_sh4.S, dc_turn); TRX_DC_ASMOFF2 bit 1024 turns it off.
     if ((g_DC_AsmOff2 & 1024) == 0) {
-        dc_turn(a, b, s, c);
+        // Through aligned words: a and b point into packed XYZ_32 values, which
+        // can lie at any address, and a real SH4 faults on a word read there.
+        int32_t t[2] = { *a, *b };
+        dc_turn(&t[0], &t[1], s, c);
+        *a = t[0];
+        *b = t[1];
         return;
     }
 #endif

@@ -61,6 +61,11 @@ bool DC_World_IsRendering(void)
     return m_Thread != nullptr && !atomic_load(&m_Paused);
 }
 
+struct kthread *DC_World_RenderThread(void)
+{
+    return m_Thread;
+}
+
 // TEMP: the longest spans the logic ran without a call to DC_World_Yield (the
 // render thread waits for the lock meanwhile), by where they began and ended.
 #define M_HOLDS 6
