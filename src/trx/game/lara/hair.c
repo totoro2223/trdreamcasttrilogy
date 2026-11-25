@@ -9,6 +9,7 @@
 #include <trx/game/game.h>
 #include <trx/game/interpolation.h>
 #include <trx/game/lara.h>
+#include <trx/game/lara/draw.h>
 #include <trx/game/lara/mesh.h>
 #include <trx/game/lara/pose.h>
 #include <trx/game/lara/skin/joints.h>
@@ -97,6 +98,9 @@ static void M_CalculateSpheres(
     const XYZ_16 *mesh_rots = pose != nullptr ? pose->rots : Anim_GetFrameRots(frame);
 
     Matrix_TranslateRel16(pose != nullptr ? pose->offset : frame->offset);
+#if defined(__DREAMCAST__)
+    Matrix_TranslateRel32((XYZ_32) { 0, Lara_Draw_GetIKDrop(), 0 });
+#endif
     Matrix_Rot16(mesh_rots[LM_HIPS]);
 
     Matrix_Push();
@@ -175,6 +179,9 @@ static void M_CalculateSpheres_I(
     const XYZ_16 *mesh_rots_2 = Anim_GetFrameRots(frame_2);
     Matrix_InitInterpolate(frac, rate);
     Matrix_TranslateRel16_ID(frame_1->offset, frame_2->offset);
+#if defined(__DREAMCAST__)
+    Matrix_TranslateRel32_I((XYZ_32) { 0, Lara_Draw_GetIKDrop(), 0 });
+#endif
     Matrix_Rot16_ID(mesh_rots_1[LM_HIPS], mesh_rots_2[LM_HIPS]);
 
     Matrix_Push_I();

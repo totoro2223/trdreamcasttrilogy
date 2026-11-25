@@ -7,6 +7,7 @@
 #include "dc_watchdog.h"
 
 #include "dc_lua_alloc.h"
+#include "dc_world.h"
 
 #include <arch/irq.h>
 #include <arch/timer.h>
@@ -106,6 +107,8 @@ typedef struct {
 // waits or runs with interrupts off shows there.
 static M_PROF_SLOT m_Prof[M_PROF_SLOTS];
 static M_PROF_SLOT m_ProfPR[M_PROF_SLOTS];
+// The render thread's PC ("[prof] r"): the native mode draws there.
+static M_PROF_SLOT m_ProfR[M_PROF_SLOTS];
 
 static void M_ProfCount(M_PROF_SLOT *const table, const uint32_t pc)
 {
@@ -151,6 +154,10 @@ static void *M_Profile(void *const param)
         }
         M_ProfCount(m_Prof, thread->context.pc);
         M_ProfCount(m_ProfPR, thread->context.pr);
+        kthread_t *const render = DC_World_RenderThread();
+        if (render != nullptr) {
+            M_ProfCount(m_ProfR, render->context.pc);
+        }
         samples++;
         const uint64_t now = timer_ms_gettime64();
         if (now - last_dump < M_PROF_DUMP_MS) {
@@ -159,6 +166,7 @@ static void *M_Profile(void *const param)
         printf("[prof] begin %lu samples\n", (unsigned long)samples);
         M_ProfDump(m_Prof, "[prof]");
         M_ProfDump(m_ProfPR, "[prof] pr");
+        M_ProfDump(m_ProfR, "[prof] r");
         printf("[prof] end\n");
         samples = 0;
         last_dump = timer_ms_gettime64();

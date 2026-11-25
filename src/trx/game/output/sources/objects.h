@@ -58,6 +58,14 @@ void OutputSource_Objects_StageObjectMesh(const OBJECT_MESH *mesh);
 const SCENE_SOURCE *OutputSource_Objects_GetSource(void);
 
 #if defined(__DREAMCAST__)
+// Paints the mesh's big opaque faces into the occlusion buffer (m: the game's
+// matrix placing it), those within the window.
+void OutputSource_Objects_OcclAdd(
+    int32_t mesh_idx, const MATRIX *m, int32_t left, int32_t top,
+    int32_t right, int32_t bottom);
+#endif
+
+#if defined(__DREAMCAST__)
 // Frames drawn so far (the Dreamcast's output counts them).
 extern uint32_t g_DC_FrameCount;
 // Lets go of the object meshes not drawn for max_age frames; they are built

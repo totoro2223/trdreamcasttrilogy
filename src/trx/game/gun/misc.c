@@ -22,6 +22,10 @@
 #include <trx/game/sound.h>
 #include <trx/game/spawn.h>
 
+#if defined(__DREAMCAST__)
+    #include <platform/dreamcast/dc_ragdoll.h>
+#endif
+
 #define M_NEAR_ANGLE (DEG_1 * 15) // = 2730
 
 typedef struct {
@@ -440,6 +444,13 @@ void Gun_HitTarget(
     LARA_INFO *const lara = Lara_GetLaraInfo();
     const bool was_alive = item->hit_points > 0;
     Item_TakeDamage(item, damage, IDF_NONE, Lara_GetItem());
+#if defined(__DREAMCAST__)
+    if (was_alive && item->hit_points <= 0) {
+        DC_Ragdoll_Start(
+            item, start != nullptr ? &start->pos : nullptr,
+            hit_pos != nullptr ? &hit_pos->pos : nullptr);
+    }
+#endif
     if (was_alive && item->hit_points <= 0
         && g_Config.gameplay.target_mode == TARGET_LOCK_MODE_SEMI) {
         lara->target = nullptr;

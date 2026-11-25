@@ -18,6 +18,7 @@
 
 #include <trx/config.h>
 #include <trx/config/common.h>
+#include <trx/game/game_flow/common.h>
 #include <trx/core/log.h>
 
 #include <stdio.h>
@@ -239,8 +240,59 @@ void DC_Settings_Load(const char *const saves_dir)
     LOG_INFO("render options loaded from the memory card");
 }
 
+// What ApplyDefaults sets when the mode changes: the demo's own change of mode
+// is undone from here.
+static struct {
+    bool active;
+    DC_MODE mode;
+    DC_FPS fps;
+    bool cel;
+    bool bump;
+    bool room_cel;
+    TEXTURE_FILTER filter;
+    SHADOW_TYPE shadow;
+} m_Temp = {};
+
+void DC_Settings_TempBegin(void)
+{
+    if (m_Temp.active) {
+        return;
+    }
+    m_Temp.active = true;
+    m_Temp.mode = g_Config.rendering.dc_mode;
+    m_Temp.fps = g_Config.rendering.dc_fps;
+    m_Temp.cel = g_Config.rendering.dc_cel_shading;
+    m_Temp.bump = g_Config.rendering.dc_bump_mapping;
+    m_Temp.room_cel = g_Config.rendering.dc_room_cel;
+    m_Temp.filter = g_Config.rendering.texture_filter;
+    m_Temp.shadow = g_Config.visuals.shadow_type;
+}
+
+void DC_Settings_TempEnd(void)
+{
+    if (!m_Temp.active) {
+        return;
+    }
+    m_Temp.active = false;
+    CONFIG_SET(g_Config.rendering.dc_mode, m_Temp.mode);
+    Config_Update();
+    CONFIG_SET(g_Config.rendering.dc_fps, m_Temp.fps);
+    CONFIG_SET(g_Config.rendering.dc_cel_shading, m_Temp.cel);
+    CONFIG_SET(g_Config.rendering.dc_bump_mapping, m_Temp.bump);
+    CONFIG_SET(g_Config.rendering.dc_room_cel, m_Temp.room_cel);
+    CONFIG_SET(g_Config.rendering.texture_filter, m_Temp.filter);
+    CONFIG_SET(g_Config.visuals.shadow_type, m_Temp.shadow);
+}
+
 void DC_Settings_Save(void)
 {
+    if (m_Temp.active) {
+        const GF_LEVEL *const level = GF_GetCurrentLevel();
+        if (level != nullptr && level->type == GFL_DEMO) {
+            return;
+        }
+        DC_Settings_TempEnd();
+    }
     // A test disc that forces the mode or the shadows is not the player
     // choosing: those would stay on the card.
     if (m_Path[0] == '\0' || g_DC_TestMode >= 0 || g_DC_TestShadow >= 0

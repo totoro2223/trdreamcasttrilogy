@@ -70,8 +70,10 @@ static void M_Recover(
 {
     (void)data;
     printf(
-        "TRX: exception %04x at %08lx: starting the disc over\n",
-        (unsigned)code, (unsigned long)context->pc);
+        "TRX: exception %04x at %08lx (pr %08lx, address %08lx): starting the "
+        "disc over\n",
+        (unsigned)code, (unsigned long)context->pc, (unsigned long)context->pr,
+        *(volatile unsigned long *)0xFF00000Cu);
     DC_Crumb_Exception(
         (unsigned)code, (unsigned long)context->pc, (unsigned long)context->pr,
         (unsigned long)context->r[15], *(volatile unsigned long *)0xFF00000Cu);
@@ -597,7 +599,7 @@ int __wrap_main(int argc, char *argv[])
     DC_Games_Init();
     DC_Crumb(DC_CRUMB_GAMES, "games ready");
     M_InstallRecovery();
-#if defined(TRX_DC_MMU_NULL_TRAP)
+#if defined(TRX_DC_MMU_NULL_TRAP) || defined(TRX_DC_STRICT)
     // Without the MMU a null pointer reads the boot ROM and a null call runs
     // it, which crashes far from the cause. With it on and nothing mapped in
     // P0 (the engine runs in P1), both raise a TLB miss that KOS reports.

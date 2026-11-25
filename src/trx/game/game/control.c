@@ -3,6 +3,7 @@
 #include <trx/debug.h>
 #include <trx/game/game_flow/common.h>
 #if defined(__DREAMCAST__)
+    #include <platform/dreamcast/dc_ragdoll.h>
     #include <platform/dreamcast/dc_strict.h>
     #include <platform/dreamcast/dc_world.h>
 #endif
@@ -418,6 +419,10 @@ void Game_TickPostControl(void)
 
 void Game_TickEndFrame(void)
 {
+#if defined(__DREAMCAST__)
+    // Last in the tick: the bodies' poses then match what the tick publishes.
+    DC_Ragdoll_Control();
+#endif
     Output_AnimateTextures(1);
     Output_Overlay_UpdateLetterbox();
     Output_Sky_Update();

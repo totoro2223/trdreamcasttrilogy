@@ -60,6 +60,25 @@
     mov.b   r0,@(\dst,r2)
     .endm
 
+! CHANNEL with no tint: the byte at \shift times k (r3), saturated.
+    .macro KCHANNEL shift, dst
+    mov     r4,r0
+    .if \shift == 16
+    shlr16  r0
+    .elseif \shift == 8
+    shlr8   r0
+    .endif
+    extu.b  r0,r0
+    mul.l   r3,r0
+    sts     macl,r0
+    shlr8   r0
+    mov     r0,r1
+    shlr8   r1
+    neg     r1,r1
+    or      r1,r0
+    mov.b   r0,@(\dst,r2)
+    .endm
+
 ! One of TR3's lights, number \n, if the object has that many (count in r2,
 ! the light in r4, the normal in fv4): its colour times n.l, if n.l is over
 ! 0, added to the colour in the frame at 20, 24, 28.
@@ -137,12 +156,32 @@ _dc_xform_object:
     fmov.s  fr9,@-r15
     fmov.s  fr10,@-r15
     fmov.s  fr11,@-r15
-    add     #-48,r15
+    add     #-52,r15
     mov.l   r4,@(0,r15)
     mov     r4,r1
     add     #76,r1
     mov.l   @r1,r1
     mov.l   r1,@(16,r15)            ! TR3's light (0: not TR3)
+    ! Frame slot 48: 1 when the tint is 256 in all four (no tint).
+    mov     r4,r1
+    add     #60,r1
+    mov     #1,r3
+    shll8   r3
+    mov.l   @r1+,r0
+    xor     r3,r0
+    mov     r0,r2
+    mov.l   @r1+,r0
+    xor     r3,r0
+    or      r0,r2
+    mov.l   @r1+,r0
+    xor     r3,r0
+    or      r0,r2
+    mov.l   @r1,r0
+    xor     r3,r0
+    or      r0,r2
+    tst     r2,r2
+    movt    r0
+    mov.l   r0,@(48,r15)
     mov.l   @(0,r4),r13
     mov.l   @(4,r4),r8
     mov.l   @(8,r4),r9
@@ -612,6 +651,25 @@ lights_done:
     mov.l   @r4,r4                  ! the vertex colour
     mov     r14,r2
     add     #24,r2
+    mov.l   @(48,r15),r0
+    tst     r0,r0
+    bt      tr3_tinted
+    ! No tint: the tint's product leaves k as it is (256 * k >> 8) and the
+    ! alpha's the byte itself, so a product per colour channel.
+    TR3K    28
+    KCHANNEL 16, 0
+    TR3K    24
+    KCHANNEL 8, 1
+    TR3K    20
+    KCHANNEL 0, 2
+    mov     r4,r0
+    shlr16  r0
+    shlr8   r0
+    mov.b   r0,@(3,r2)
+    mov.l   @(24,r14),r1
+    bra     coloured
+    nop
+tr3_tinted:
     TR3K    28
     CHANNEL 16, 72, 0, 1
     TR3K    24
@@ -627,7 +685,7 @@ obj_finish:
     mov     r13,r5
     add     #28,r5
     fmov.s  fr11,@r5                ! the nearest 1/z
-    add     #48,r15
+    add     #52,r15
     fmov.s  @r15+,fr11
     fmov.s  @r15+,fr10
     fmov.s  @r15+,fr9

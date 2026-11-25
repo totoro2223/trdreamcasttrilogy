@@ -499,11 +499,14 @@ static inline int64_t M_BlendLinear(
         return (a + b) >> 1;
     }
     const int64_t d = b - a;
-    if (frac < 32 && d > -(1 << 26) && d < (1 << 26)) {
+    const int64_t n64 = d * frac;
+    // Whenever the product fits 32 bits (frac runs past 32 with the finer
+    // ticks, which sent every entry to the library's 64-bit division).
+    if (n64 > INT32_MIN && n64 <= INT32_MAX) {
         // n / rate truncated toward zero, by the reciprocal (inv_rate is
         // 2^32 / rate rounded down, so the estimate falls short by at most
         // two) and not by the library's 32-bit division.
-        const int32_t n = (int32_t)d * frac;
+        const int32_t n = (int32_t)n64;
         const uint32_t u = n < 0 ? 0u - (uint32_t)n : (uint32_t)n;
         uint32_t q = (uint32_t)(((uint64_t)u * inv_rate) >> 32);
         uint32_t r = u - q * (uint32_t)rate;
@@ -513,7 +516,7 @@ static inline int64_t M_BlendLinear(
         }
         return a + (n < 0 ? -(int64_t)q : (int64_t)q);
     }
-    return a + (d * frac) / rate;
+    return a + n64 / rate;
 }
 
 // The original games' pose blend (rendering.dc_linear_pose): every entry of

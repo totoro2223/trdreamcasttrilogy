@@ -8,6 +8,7 @@
 // beside it rather than over it.
 #include "nolua.h"
 #include "dc_mode.h"
+#include "dc_settings.h"
 
 #include <trx/config.h>
 #include <trx/game/creature/common.h>
@@ -409,11 +410,24 @@ static bool M_OnTick(
     // The demo's keys (a game demo, or a disc made with TRX_DC_DEBUGKEYS): L
     // cycles what the screen shows, R the graphic modes.
     static int32_t m_View = 0; // 0 nothing, 1 fps, 2 info, 3 consumption
+    // What the triggers did outside a demo waits for no one: each demo starts
+    // with the screen as the menu left it, and what a demo changed ends with it.
+    static bool m_WasDemo = false;
+    if (in_demo != m_WasDemo || (!in_demo && !g_DC_TestDebugKeys)) {
+        DC_Input_TakeDebugView();
+        DC_Input_TakeDebugMode();
+        m_View = 0;
+        if (!in_demo && !g_DC_TestDebugKeys) {
+            DC_Settings_TempEnd();
+        }
+    }
+    m_WasDemo = in_demo;
     if (g_DC_TestDebugKeys || in_demo) {
         if (DC_Input_TakeDebugView()) {
             m_View = (m_View + 1) % 4;
         }
         if (DC_Input_TakeDebugMode()) {
+            DC_Settings_TempBegin();
             static const char *const names[] = { "Graphics", "Performance",
                                                  "Original",
                                                  "Experimental 60", "Native 60" };

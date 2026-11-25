@@ -1253,3 +1253,88 @@ ni CDI ni Flycast.
 - C: no se tocó (ver PROBADO).
 - A, rig: ver PLAN_60_FIJO.md, tercera tanda. Problemas por el camino: (1) los objetos de TR1 traen `depth_adjustment` en sus mallas; se aplica por tramo (`MeshBuilder_AdjustDepthFrom`) en vez de rechazar el objeto; (2) con los rigs, TR1 emitía 892 polígonos frente a 862: no era la niebla (con `M_RIG_REACH` 2048 → 1024 sigue igual) ni las mallas pequeñas lejanas (se dejan fuera marcando su tramo como fuera de pantalla); se queda así; (3) un `sed` que quitaba las trazas temporales borró 37 líneas de sondas del batcher acabadas en `// TEMP`; se recuperaron comparando con `HEAD`.
 - Resultados con el mismo binario (rigs encendidos / apagados con `TRX_DC_ASMOFF2=2097152`): TR1 Native 60 55,3 / 54,1 fps; TR1 Original `stage`+`pass` 13,5 / 14,1 ms; TR3 Native 60 51,3 / 51,1 fps. Informes en `benchmarks/` (builds 1356, 1357, 1359, 1360, 1373-1379).
+
+## 22/11/2026 — Flycast estricto y emisión de caras (rama full60fps, DC builds 1511-1517)
+
+- Herramienta: Flycast con `STRICT_MODE` (`G:\FlycastSrc\build_strict.bat` → `G:\FlycastStrict`, intérprete): cachés, emparejamiento, esperas por registro (`sh4_cycles.cpp`) y `movca.l` sin lectura (`sh4_cache.h`, `AllocateWrite`). `FLYCAST_STALLS=<f>` vuelca ciclos de espera por PC y `FLYCAST_PROFILE=<f>` ciclos totales por PC, cada segundo emulado. Agrupar por función con `sh-elf-nm -n -C` y un script; por línea de C con `sh-elf-objdump -d -l`.
+- Perfil de la vista inicial de Jungle (build 1513, ms/frame): emisión ~5,1, relieve ~4,5, transformación ~4,2, sombras suaves ~3,1, `scif_write` 1,2 (solo builds de prueba). Las esperas son ~17 % del total: rinde más hacer menos trabajo que reordenar.
+- Relieve (1512-1514) y recorte cercano (1515-1517): ver PROBADO. `pass` total 18,2 → 16,5 ms en el Flycast estricto.
+- `M_EmitTriangle` hace casi solo caras que cruzan el plano cercano (147/frame en esa vista, ~1600 ciclos cada una tras el arreglo); el resto de las caras va por `dc_emit_run`.
+- Sombras suaves (1518): la sombra de Lara cae en ~5 caras por frame, pero se proyectaban los 2.837 vértices de las salas visibles (`dc_soft_project` 2,1 ms). Ahora `M_EmitShadowFaces` prueba la caja de cada trozo de la sala contra la celda (la misma prueba de 8 esquinas que ya hacía con la instancia, ahora `M_SoftBoxOff`) y solo proyecta y recorre los trozos que la tocan. Vale porque `M_BuildChunks` deja cada trozo con sus propios vértices (si no, la sala no se trocea). `pass` 16,5 → 15,0 ms.
+- Relieve (1519): el brillo corta cada quad en una rejilla de 5×5 puntos y calcula `M_BumpVertex` en C en todos; las 4 esquinas de la rejilla son las de la cara, ya calculadas al ponerla en cola, y ahora se reutilizan. El color por punto se mezclaba canal a canal en float; ahora en enteros (pesos en cuartos, mismo redondeo). Lo que queda del relieve está repartido: `M_BumpAt` del brillo (atan2, varias raíces) ~0,7 ms, `dc_bump_vertex` 1,0, `M_EmitBump` 0,9.
+- Transformación (1520-1523): perfil por instrucción de `dc_xform_room` (`annot.py`: ciclos y esperas por dirección). El color con tinte de los vértices que se transforman (TR3 nunca es "blanco") hacía 7 `mul.l` encadenados por vértice (~90 ciclos). Sin tinte bastan 2 (k par ≤ 512) o 3. La 1520 solo cubría k ≤ 256 y no entraba nunca: en TR3 k vale 512. La 1521 se gastó en un disco fallido (mi Flycast estricto seguía abierto con el CDI).
+- Objetos (1524): lo mismo en `dc_xform_object` para TR3 (`lights_done`): sin tinte, 3 productos en vez de 7 y el alfa copiado. El marco de pila pasa de 48 a 52 bytes (hueco 48: sin tinte). Lo que queda del objeto: el bucle y la transformación (~170 000 ciclos), el color de TR3 en coma flotante (`tr3col` + `TR3K`) y el cel (`coloured`).
+- Brillo a ensamblador (1525-1531): el brillo nuevo pasado a `bump_sh4.S` iguala al C (DC_VERIFY 0 diferencias) pero va más lento (+0,9 ms): el asm escrito "en el mismo orden que el C" relee todo de la pila. Vuelve al C. Para ganar ahí hay que reescribirlo con los valores en registros, no traducirlo.
+- Modo estricto con MMU (1526-1529): las builds `DC_STRICT=1` encienden ahora la MMU (`dc_main.c`, `TRX_DC_MMU_NULL_TRAP || TRX_DC_STRICT`). El Flycast estricto la emula entera (sin FAST_MMU). Salió un nulo real: `Sparks_DetachItem` antes de `Sparks_Reset` en la carga del nivel (desde 595d32076, que pasó `m_Sparks` a memoria del nivel). Arreglado con una guarda en las dos funciones `Detach`. Después, Jungle sin excepciones. Ojo: `meson configure -Dc_args=...` pisa las rutas de KOS del archivo cruzado; no usarlo.
+- 23/11/2026: G: lleno (mkisofs "No space left"); borrados a petición del usuario los 68 CDI/ISO de `build/` (~32 GB).
+- 64 bits, recorte y gather (1532-1537): ver PROBADO. Para probar en consola el relieve en asm: `TRX_DC_ASMOFF=0 TRX_DC_ASMOFF2=2174786560` (los bits por defecto 27302912 más el 2147483648). En la build de verificación salen `[modelview-verify] MISMATCH` (redondeo de `dc_model_view` contra su C con la misma entrada, margen absoluto 1e-6); no tocado hoy.
+- Benchmarks en Flycast estricto (demo 0, modo native-60: relieve apagado, sombra del juego), base DC build 1531 frente a 1537: TR3 (Londres) 51,4 → 51,4 fps, `logic` 6,3 → 6,3, `stage` 3,5 → 3,4, `pass` 8,8 → 8,9 ms; TR1 49,7 → 49,8 fps, `logic` 3,9 → 3,7, `stage` 4,0 → 3,9, `pass` 10,3 → 10,4 ms. La división de 64 bits pesaba en Jungle (modo por defecto, pose lineal) y casi nada aquí. En native-60 Lara de pie no muestra el octógono (ya en la base; saltando sí se ve): fallo aparte, sin mirar.
+- Benchmarks en modo graphics (sombra proyectada de Lara y relieve), base 1531 frente a 1537, mismo Flycast estricto y misma VMU: TR3 22,3 → 22,0 fps (`pass` 26,1 → 26,9), TR1 27,5 → 27,4 fps (`pass` 19,6 → 19,9). La subida de `pass` era la envoltura de `M_BumpGatherLights` sin `inline` (arreglado en 1550: Jungle `pass` de nuevo 14,6-14,8). Ojo al comparar: `G:\FlycastStrict2` sin la VMU de pruebas arranca con otros ajustes (sin sombras de enemigos) y da cifras no comparables con `G:\FlycastStrict`; ya lleva una copia de esa VMU.
+- Brillo para el SH-4 (1552-1556): `dc_bump_shine` en `bump_sh4.S`, escrito para registros y no traducido del C (la traducción de la 1530 iba más lenta). La primera prueba no lo llamaba nunca: `lights.any_passing` se ponía a verdadero con una luz de paso que luego se descartaba por no llegar a la sala, y quedaba así; eso también tenía apagada la caché del relieve. Recalcularlo tras el descarte arregla ambas cosas. Jungle: `pass` 14,7 → 13,2 ms. El brillo en C solo queda para vértices con una luz de paso que de verdad llega; `TRX_DC_ASMOFF` bit 512 vuelve todo el relieve al C.
+- Benchmarks graphics con el brillo SH-4 y la caché (DC builds 1557/1558) frente a la base 1531 (1548/1549), misma VMU: TR3 22,3 → 22,8 fps, `pass` 26,1 → 25,6, `logic` 4,1 → 3,9, `stage` 4,6 → 4,4 ms, frames de más de 35 ms 67 % → 65 %; TR1 27,5 → 27,6 fps, `pass` 19,6 → 19,7 ms (igual). La ganancia grande de Jungle (−1,5 ms) no se repite en las demos: en ellas el relieve cercano pesa menos o lo lleva el C (luces de paso, disparos).
+- Perfil del benchmark TR3 graphics entero (DC build 1565, 94 ventanas de 1 s sumadas con `prof_accum.py`), ms por frame: `scif_write` 8,2 (el registro serie de `TRX_DC_LOG=1`: ~1100 líneas que el SCIF escribe esperando carácter a carácter; infla los benchmarks con registro), `M_Control` de los objetos 5,7 (logic), `dc_bump_shine` 4,9, `dc_bump_vertex` 3,0, `M_EmitBumpGrid` 2,7, `dc_xform_room` 1,8, `dc_emit_run` 1,7, `dc_xform_object` 1,6, `dc_soft_project` 0,9, `M_EmitBump` 0,8, `dc_sil_project` 0,7, `M_BumpVertex` 0,6. El relieve es ~12 ms de los 25,7 de `pass`, sobre todo el brillo en rejilla. Además: ~310 avisos "polygons did not fit the vertex buffers" (~24 000 polígonos sin dibujar en la demo; ya en la base 1531).
+- Polígonos perdidos y rejilla (1566-1570): los avisos "did not fit" del benchmark de TR3 salían casi todos con el pool a un cuarto (el reparto sigue a los picos de los frames anteriores y un salto de escena desborda una lista). Margen común de 64 KB (`M_Spill`, varios `pvr_prim` por lista). Lo que quedaba era la lista TR llena del brillo en rejilla: cada fila ahora en tira. Benchmark TR3 graphics: 22,3 → 24,1 fps, perdidos 24 606 → 9 504 (frames con ~320 KB usados: hace falta más pool o menos vértices). TR1 sin cambio.
+- Polígonos restantes (1572-1575): con el aviso ampliado (lo que no cupo de cada lista y, en una sonda TEMP ya quitada, cuánto era relieve) se vio que el relieve apenas perdía (~30 KB) y lo que se perdía era geometría translúcida por tramos y punch-through: el relieve, emitido antes, se comía la lista TR. Ahora el relieve no toma el margen y deja 32 KB; la rejilla cae a cara simple sin sitio. Benchmark TR3 graphics: 0 polígonos perdidos (antes 24 606), 22,3 → 24,5 fps desde la base 1531.
+
+## 23/11/2026 - Techo de una visibilidad precalculada (DC builds 1579-1582)
+
+Pregunta: ¿ganaría fps cambiar cómo se procesan las salas, con una lista de
+trozos visibles por casilla calculada en `make_disc` (PVS)? Medido en el
+benchmark de TR3 en modo Graphics (Flycast estricto, en paralelo) con
+`TRX_DC_PASS_TIMERS` y contadores TEMP de trozos y vértices, con y sin la
+oclusión por rayos de `M_ChunkHiddenAt` (que ya es un PVS perezoso por casilla
+y altura, con el mismo criterio conservador que tendría el del disco).
+
+- Sin rayos: pass 25,3 ms, 24,3 fps. Con rayos: pass 25,1 ms, 24,1 fps (ruido).
+- Visibilidad por frame: cull 58 µs (128 con rayos), preparación 50 µs, luz
+  58 µs. No hay CPU que ahorrar ahí.
+- Los rayos ocultan 87 de 6448 vértices de sala por frame (1,3 %): portales,
+  búfer de oclusión de salas, frustum y niebla ya quitan casi todo lo oculto.
+- Las salas son la mayor parte del pass: transform 5,2 ms y lo de después
+  (emisión, relieve, sombras sobre salas) ~20 ms en la ventana pesada.
+
+Conclusión: el PVS no compensa; los rayos siguen apagados
+(`TRX_DC_OCCLUDE 0`). La lógica del juego (1,9-3,7 ms) tampoco. Sondas
+retiradas. Las dos primeras builds (1579-1580) no sacaban los registros en
+Graphics porque iban dentro del bloque de salas nativas.
+
+## 24/11/2026 - Relieve con luces de paso, coleta con IK y ragdoll (DC builds 1586-1609)
+
+Relieve: `M_BumpPassingNear` deja saltar o reutilizar las caras que ninguna
+luz de paso alcanza. TR3 24,5 → 25,6 fps. Dar la caché del sombreado también
+con luces de paso no ganó nada (25,5) y se revirtió.
+
+Coleta: con la IK de piernas el cuerpo baja `m_IKDropUnits` al dibujarse y el
+anclaje de la coleta no; `hair.c` aplica la misma bajada (un frame de retraso).
+
+Ragdoll (`src/platform/dreamcast/dc_ragdoll.c`), ganchos en `gun/misc.c`
+(inicio), `game/control.c` (`Game_TickEndFrame`, último del tick para que la
+pose coincida con lo publicado al hilo de render), `objects/draw.c` (la pose y
+los límites sustituyen a los del frame) y `level/common.c` (tipos del nivel).
+
+- Cada juego y enemigo tiene su esqueleto (TR2 Venecia: 19 y 27 mallas, no las
+  15 de Lara); la tabla fija inicial no encontraba ninguno.
+- Explosiones vistas y su causa: conos de 20° en objetos que toman prestadas
+  las animaciones de otro (las suyas no mueven nada) y el giro libre de los
+  miembros, que arrastraba el cono de la articulación hija. Arreglado con cono
+  amplio sin datos y giro tomado del padre. Mover también la posición anterior
+  en la corrección del cono hizo que nada reposara (la gravedad se acumula):
+  revertido. Tope de velocidad 64 por tick y punto.
+- Coste por cuerpo en Flycast: física 0,4-0,7 ms, suelo 0,1-0,2, pose
+  0,15-0,2 (con `Math_Atan` en vez de `atan2f`).
+- Pendiente: verlo en pantalla, el cuerpo que aún se agita, TR1/TR3.
+
+## 25/11/2026 - Mipmaps en todas las páginas y prueba con MMU (DC builds 1610-1623)
+
+- `texvq` ya no marca las páginas con alpha (bit 31): todas llevan sus niveles.
+  La corrupción del 29/10 se atribuía a que `M_PageBlock` no saltaba los
+  niveles; ahora además leía los índices en palabras desalineadas (byte 7510):
+  la MMU del Flycast estricto lo cazó en TR2 (excepción 0x0E0). Arreglado con
+  lecturas de 16 bits.
+- Páginas sin VQ: `M_LoadRawMips` hace la cadena (1x1 en el byte 6, 2x2 en 8,
+  4x4 en 16, ... la página en 0xAAB0) al cargarlas.
+- `rendering.dc_mipmaps` por defecto encendido (la tarjeta no lo guarda desde
+  el formato 14).
+- El registro de páginas distingue `r`/`q` (sin VQ con niveles).
+- El manejador de excepciones imprime también PR y TEA.
+- Pendiente: verlo en pantalla; la demo con MMU (TAREAS).

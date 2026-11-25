@@ -143,6 +143,27 @@ MATRIX *DC_MeshBatcher_RigBones(
 bool DC_MeshBatcher_RayBlocked(
     const MESH_BATCHER *batcher, const OUTPUT_MESH *mesh, const ROOM *room,
     const XYZ_32 *eye, const XYZ_32 *to);
+// The occlusion buffer (rooms/draw.c, M_FindOccluded): cleared for the
+// game's view, asked whether a window lies wholly nearer than z_min (the
+// game's view z), and painted with a room's big opaque faces (m: the game's
+// matrix with the room's position).
+void DC_Occl_Begin(
+    int32_t min_x, int32_t min_y, int32_t max_x, int32_t max_y,
+    int32_t center_x, int32_t center_y, int32_t persp);
+bool DC_Occl_RectHidden(
+    int32_t left, int32_t top, int32_t right, int32_t bottom, float z_min);
+// Whether a portal (view-space corners) lies wholly behind what is painted
+// within the window.
+bool DC_Occl_PortalHidden(
+    const float v[4][3], int32_t left, int32_t top, int32_t right,
+    int32_t bottom);
+void DC_MeshBatcher_OcclAddRoom(
+    const MESH_BATCHER *batcher, const OUTPUT_MESH *mesh, const MATRIX *m,
+    int32_t left, int32_t top, int32_t right, int32_t bottom);
+// TEMP: the same ray, each sector it crosses logged.
+void DC_MeshBatcher_TraceRay(
+    const MESH_BATCHER *batcher, const OUTPUT_MESH *mesh, const ROOM *room,
+    const XYZ_32 *eye, const XYZ_32 *to);
 #endif
 
 void MeshBatcher_UpdateMeshGeometry(

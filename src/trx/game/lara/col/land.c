@@ -491,7 +491,7 @@ static void M_Run(ITEM *const item, COLL_INFO *const coll)
             && (coll->side_front.floor < -STEPUP_HEIGHT
                 || coll->side_front.floor >= -STEP_L / 2)) {
             coll->side_mid.floor = 0;
-        } else {
+        } else if (M_STEP_ANIMS) {
             if (Item_TestFrameRange(
                     item, M_LF_RUN_L_HEEL_GROUND, M_LF_RUN_R_FOOT_GROUND)) {
                 Item_SwitchToAnim(item, LA(LA_RUN_UP_STEP_LEFT), 0);

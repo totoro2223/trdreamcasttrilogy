@@ -154,6 +154,26 @@ _dc_xform_room:
     add     #64,r1
     mov.l   @r1,r1
     mov.l   r1,@(32,r15)            ! TR3's k (0: not TR3)
+    ! Frame slot 56: 1 when the tint is 256 in all four (no tint).
+    mov     r4,r1
+    add     #48,r1
+    mov     #1,r3
+    shll8   r3
+    mov.l   @r1+,r0
+    xor     r3,r0
+    mov     r0,r2
+    mov.l   @r1+,r0
+    xor     r3,r0
+    or      r0,r2
+    mov.l   @r1+,r0
+    xor     r3,r0
+    or      r0,r2
+    mov.l   @r1,r0
+    xor     r3,r0
+    or      r0,r2
+    tst     r2,r2
+    movt    r0
+    mov.l   r0,@(56,r15)
     mov     r4,r5
     mov.l   @r5+,r13
     mov.l   @r5+,r8
@@ -763,9 +783,144 @@ shaded:
     add     #32,r14
     bra     vert_loop
     nop
-! The tinted colour, as M_Colour.
+! The tinted colour, as M_Colour. With no tint, red and blue go in one
+! product (lanes of 16 bits) and green in another, the alpha kept and the
+! colour's ABGR turned to ARGB by swapping the halves: the same bytes as the
+! four channels below. k at most 256 passes no 255. An even k up to 512 (TR3
+! doubles its colours) is halved and shifted one less, exact, and each lane
+! saturated. Any other k, or a tint, takes the four channels.
 tinted:
     mov.l   @(28,r15),r4
+    mov.l   @(56,r15),r0
+    tst     r0,r0
+    bt      tint_any
+    mov     #1,r1
+    shll8   r1
+    cmp/hi  r1,r3                   ! k > 256
+    bt      tint_high
+    mov.l   .Lrb,r1
+    mov     r4,r0
+    and     r1,r0
+    mul.l   r3,r0
+    mov     r4,r2
+    shlr8   r2
+    extu.b  r2,r2                   ! green
+    sts     macl,r0
+    mul.l   r3,r2
+    shlr8   r0
+    and     r1,r0                   ! red at 0, blue at 16
+    sts     macl,r2
+    shlr8   r2
+    bra     tint_store
+    nop
+tint_high:
+    add     r1,r1                   ! 512
+    cmp/hi  r1,r3
+    bt      tint_odd
+    mov     r3,r0
+    tst     #1,r0
+    bf      tint_odd
+    shlr    r3                      ! k / 2
+    mov.l   .Lrb,r1
+    mov     r4,r0
+    and     r1,r0
+    mul.l   r3,r0
+    mov     r4,r2
+    shlr8   r2
+    extu.b  r2,r2                   ! green
+    sts     macl,r0
+    mul.l   r3,r2
+    mov     #-7,r1
+    shld    r1,r0
+    mov.l   .Lrb9,r3
+    and     r3,r0                   ! red at 0, blue at 16, up to 510
+    mov     r0,r3
+    shlr8   r3
+    mov.l   .Lone,r1
+    and     r1,r3                   ! 1 in the lanes past 255
+    mov     r3,r1
+    shll8   r1
+    sub     r3,r1                   ! 255 in them
+    or      r1,r0
+    mov.l   .Lrb,r1
+    and     r1,r0
+    sts     macl,r2
+    mov     #-7,r1
+    shld    r1,r2                   ! green, up to 510
+    mov     r2,r1
+    shlr8   r1
+    neg     r1,r1
+    or      r1,r2
+    extu.b  r2,r2
+tint_store:
+    swap.w  r0,r0
+    shll8   r2
+    or      r2,r0
+    mov.l   .Lalpha,r2
+    and     r4,r2
+    or      r2,r0
+tint_put:
+    mov     r14,r2
+    add     #24,r2
+    mov.l   r0,@r2
+    add     #4,r2
+    mov.l   r5,@r2
+    add     #1,r7
+    add     #32,r14
+    bra     vert_loop
+    nop
+! Any other k with no tint: a product per channel, each saturated.
+tint_odd:
+    mov     r4,r0
+    extu.b  r0,r0                   ! red
+    mul.l   r3,r0
+    mov     r4,r2
+    shlr8   r2
+    extu.b  r2,r2                   ! green
+    sts     macl,r0
+    mul.l   r3,r2
+    shlr8   r0
+    mov     r0,r1
+    shlr8   r1
+    neg     r1,r1
+    or      r1,r0
+    extu.b  r0,r0
+    shll16  r0                      ! red at 16
+    sts     macl,r2
+    mov     r4,r1
+    shlr16  r1
+    extu.b  r1,r1                   ! blue
+    mul.l   r3,r1
+    shlr8   r2
+    mov     r2,r3
+    shlr8   r3
+    neg     r3,r3
+    or      r3,r2
+    extu.b  r2,r2
+    shll8   r2
+    or      r2,r0                   ! green at 8
+    sts     macl,r1
+    shlr8   r1
+    mov     r1,r3
+    shlr8   r3
+    neg     r3,r3
+    or      r3,r1
+    extu.b  r1,r1
+    or      r1,r0                   ! blue at 0
+    mov.l   .Lalpha,r2
+    and     r4,r2
+    bra     tint_put
+    or      r2,r0
+    .align 2
+.Lrb:
+    .long   0x00FF00FF
+.Lrb9:
+    .long   0x01FF01FF
+.Lone:
+    .long   0x00010001
+.Lalpha:
+    .long   0xFF000000
+tint_any:
     mov     r14,r2
     add     #24,r2
     CHANNEL 16, 60, 0, 1

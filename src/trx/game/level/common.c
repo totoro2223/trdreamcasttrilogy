@@ -31,6 +31,7 @@
 
 #if defined(__DREAMCAST__)
     #include <platform/dreamcast/dc_level_heap.h>
+    #include <platform/dreamcast/dc_ragdoll.h>
     #include <platform/dreamcast/dc_settings.h>
     #include <platform/dreamcast/nolua.h>
     #include <trx/game/output/sources/objects.h>
@@ -195,6 +196,9 @@ RESULT Level_Initialise(
     GameStringTable_Apply(level);
 
     Effect_InitialiseArray();
+#if defined(__DREAMCAST__)
+    DC_Ragdoll_Reset();
+#endif
     LOT_InitialiseArray();
     FX_Reset();
     FX_Weather_SetWeather(level->weather_type);
