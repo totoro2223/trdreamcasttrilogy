@@ -162,6 +162,18 @@ enum {
     DC_PROBE_L_TARGET, // Gun_GetNewTarget
     DC_PROBE_L_SMASH, // LOS_CheckSmashable (Gun_SmashItems)
     DC_PROBE_L_HAIRC, // Lara_Hair_Control
+    DC_PROBE_B_SHADEK, // M_EmitBump's shade pass, the kept relief (us)
+    DC_PROBE_B_SHADEU, // ... the shade pass worked out whole (passing light)
+    DC_PROBE_B_SHINE, // ... the shine pass
+    DC_PROBE_B_FLUSH, // M_FlushBump (in the three above)
+    DC_PROBE_B_FILL, // corners worked out to fill the kept relief (count)
+    DC_PROBE_B_RESET, // kept reliefs thrown away or made (count)
+    DC_PROBE_B_NOBUD, // rooms left with no kept relief: no memory budget (count)
+    DC_PROBE_B_PASSRM, // rooms that took a passing light (count)
+    DC_PROBE_B_ROOMS, // rooms M_EmitBump looked at past the first test (count)
+    DC_PROBE_B_PNEAR, // faces a passing light reaches (count)
+    DC_PROBE_B_GRIDS, // faces drawn as a fine grid, the shade's (count)
+    DC_PROBE_B_GRIDG, // faces drawn as a grid, the shine's (count)
     DC_PROBE_COUNT,
 };
 

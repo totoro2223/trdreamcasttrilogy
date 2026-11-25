@@ -78,6 +78,7 @@ int32_t g_DC_TestSnow = -1;
 uint32_t g_DC_AsmOff = 0;
 // A second word of switches (TRX_DC_ASMOFF2), the first being full.
 uint32_t g_DC_AsmOff2 = 0;
+uint32_t g_DC_AsmOff3 = 0;
 int32_t g_DC_TestFogStart = -1;
 int32_t g_DC_TestFogEnd = -1;
 int32_t g_DC_TestRoomCel = -1;

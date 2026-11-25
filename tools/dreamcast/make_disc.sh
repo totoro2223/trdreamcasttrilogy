@@ -175,9 +175,12 @@ if [ -n "${TRX_DC_FOG:-}" ]; then
   echo "$TRX_DC_FOG" > "$STAGE/FOG.TXT"
   echo "fog $TRX_DC_FOG"
 fi
-if [ -n "${TRX_DC_ASMOFF:-}${TRX_DC_ASMOFF2:-}" ]; then
-  # Assembly routines left out (dc_mode.h, g_DC_AsmOff), a bit each.
-  echo "${TRX_DC_ASMOFF:-0} ${TRX_DC_ASMOFF2:-0}" > "$STAGE/ASMOFF.TXT"
+if [ -n "${TRX_DC_ASMOFF:-}${TRX_DC_ASMOFF2:-}${TRX_DC_ASMOFF3:-}" ]; then
+  # Assembly routines left out (dc_mode.h, g_DC_AsmOff), a bit each. With only
+  # the third mask given, the second keeps the game's own default (dc_main.c).
+  DEF2=0
+  [ -n "${TRX_DC_ASMOFF3:-}" ] && DEF2=27302912
+  echo "${TRX_DC_ASMOFF:-0} ${TRX_DC_ASMOFF2:-$DEF2} ${TRX_DC_ASMOFF3:-0}" > "$STAGE/ASMOFF.TXT"
 fi
 if [ -n "${TRX_DC_SNOW:-}" ]; then
   # A test disc that caps the weather particles (dc_main.c, SNOW.TXT).
@@ -338,9 +341,26 @@ if [ -n "$MOD" ]; then
     "$STAGE"/games/$MOD/injections/*.bin)
 fi
 shopt -u nullglob
-if [ ! -f "$VQ" ] || [ ! -f "$BUMP" ] || [ "$VQ_TOOL" -nt "$VQ" ] \
+BUMP_OVERRIDES="$ROOT/tools/dreamcast/bump_overrides.txt"
+BUMP_OPTS=()
+[ -f "$BUMP_OVERRIDES" ] && BUMP_OPTS=(-o "$BUMP_OVERRIDES")
+# Reliefs made by hand: <hash>.png in build/bump_custom/<game> (or the dir in
+# TRX_DC_BUMP_CUSTOM), named as texvq -P names the pages: a grey picture is the
+# heights (white high), an RGB one the normals (TEXVQ_NORMAL_FLIP=1 if green is
+# down, TEXVQ_NORMAL_SCALE the strength). Not in the repository (the game's
+# textures are not).
+BUMP_CUSTOM="${TRX_DC_BUMP_CUSTOM:-$ROOT/build/bump_custom/$GAME}"
+if [ -d "$BUMP_CUSTOM" ] && [ -n "$(ls "$BUMP_CUSTOM" 2>/dev/null)" ]; then
+  BUMP_OPTS+=(-C "$BUMP_CUSTOM")
+fi
+# TRX_DC_BUMP_PLAIN=1: the relief as it was before the detail filter (to compare).
+if [ -n "${TRX_DC_BUMP_PLAIN:-}" ]; then
+  BUMP_OPTS+=(-d0)
+  BUMP="$BUILD_DIR/textures-${MOD:-$GAME}-plain.bump"
+fi
+if [ ! -f "$VQ" ] || [ ! -f "$BUMP" ] || [ "$VQ_TOOL" -nt "$VQ" ]   || [ "$BUMP_OVERRIDES" -nt "$BUMP" ]   || { [ -d "$BUMP_CUSTOM" ] && [ -n "$(find "$BUMP_CUSTOM" -newer "$BUMP" -print -quit 2>/dev/null)" ]; } \
   || [ -n "$(find "$GAME_DATA" "$SHIP/games/$GAME/injections" -newer "$VQ" -print -quit)" ]   || [ -n "$MOD" ]; then
-  "$VQ_TOOL" -b "$BUMP" "$VQ" "${VQ_INPUTS[@]}"
+  "$VQ_TOOL" -b "$BUMP" "${BUMP_OPTS[@]}" "$VQ" "${VQ_INPUTS[@]}"
 fi
 cp "$VQ" "$STAGE/textures.vq"
 # The hashes of each level's pages, so that the load does not read them to

@@ -27,11 +27,12 @@
 // neither inflates, reads nor encodes the page (IDT_DC_PAGE_HASHES). The new
 // files go to <outdir>; one with nothing to change is not written.
 //
-// The relief (pvr.c's M_LoadDiscBumps): "TBP1" and the same index, then
-// count x 32768 bytes, each page's relief as the PowerVR takes it (bump
+// The relief (pvr.c's M_LoadDiscBumps): "TBP2" and the same index, then
+// count x 131072 bytes (256 by 256 texels; "TBP1" was 128 by 128, 32768), each page's relief as the PowerVR takes it (bump
 // texels, twiddled), made by bump_page.h as the game makes it, only for the
 // pages some room face uses (the game puts relief on room faces only).
 
+#define DC_BUMP_SIZE 256
 #include "../../src/platform/dreamcast/render/bump_page.h"
 
 #include <stdint.h>
@@ -77,6 +78,243 @@ typedef struct {
 } BUMP;
 
 static const char *m_BumpPath = NULL;
+// The relief's detail filter (bump_page.h), off with -d0 to make the plain one
+// for a comparison; and the zones to flatten or tune (-o <file>), by level
+// and page, in page pixels: "flat <level> <page> x0 y0 x1 y1" lies flat (a
+// painted sign, a face), "scale <level> <page> x0 y0 x1 y1 <factor>" gives the
+// relief of the zone that factor (negative turns it over: a bump that is
+// dark). A level is its file's name without the extension, in lower case.
+static int m_NoDetail = 0;
+// -D <dir>: each page's relief as pictures (PGM: the colour's brightness, the
+// heights the relief is made from, the slope's length) to see what it follows.
+static const char *m_DumpDir = NULL;
+// -P <dir>: each page of the levels as a PNG (RGBA, 256 by 256) named by the
+// hash the game keys pages by, to make a relief of one's own.
+static const char *m_PngDir = NULL;
+// -C <dir>: a relief made by hand, <hash>.png in the dir, for the page of that
+// hash (the names -P gives): a grey picture is its heights (white high), an
+// RGB one its normals (blue up; green up as OpenGL's, or down with
+// TEXVQ_NORMAL_FLIP=1 as DirectX's; TEXVQ_NORMAL_SCALE the lean's strength).
+// Any size: it is brought to 256 by 256.
+static const char *m_CustomDir = NULL;
+static int m_CustomCount = 0;
+static uint8_t *ReadFile(const char *const path, size_t *const size);
+
+// An 8 or 16 bit PNG, not interlaced, grey, RGB, grey+alpha or RGBA, as 8-bit
+// samples a pixel by channels; NULL when it is not one.
+static uint8_t *ReadPng(const char *const path, int *const w, int *const h, int *const ch)
+{
+    size_t size;
+    uint8_t *const data = ReadFile(path, &size);
+    if (data == NULL || size < 33 || memcmp(data, "\x89PNG\r\n\x1a\n", 8) != 0) {
+        free(data);
+        return NULL;
+    }
+    int depth = 0;
+    int color = -1;
+    int interlace = 1;
+    uint8_t *idat = malloc(size);
+    size_t idat_size = 0;
+    size_t at = 8;
+    while (at + 12 <= size) {
+        const uint32_t len = ((uint32_t)data[at] << 24) | ((uint32_t)data[at + 1] << 16)
+            | ((uint32_t)data[at + 2] << 8) | data[at + 3];
+        const uint8_t *const type = data + at + 4;
+        const uint8_t *const body = data + at + 8;
+        if (at + 12 + len > size) {
+            break;
+        }
+        if (memcmp(type, "IHDR", 4) == 0 && len >= 13) {
+            *w = (int)(((uint32_t)body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]);
+            *h = (int)(((uint32_t)body[4] << 24) | (body[5] << 16) | (body[6] << 8) | body[7]);
+            depth = body[8];
+            color = body[9];
+            interlace = body[12];
+        } else if (memcmp(type, "IDAT", 4) == 0) {
+            memcpy(idat + idat_size, body, len);
+            idat_size += len;
+        }
+        at += 12 + len;
+    }
+    const int channels = color == 0 ? 1 : color == 2 ? 3 : color == 4 ? 2 : color == 6 ? 4 : 0;
+    if (channels == 0 || interlace != 0 || (depth != 8 && depth != 16) || *w <= 0
+        || *h <= 0 || *w > 8192 || *h > 8192) {
+        free(idat);
+        free(data);
+        return NULL;
+    }
+    const int bpp = channels * depth / 8;
+    const size_t row = (size_t)*w * bpp;
+    uLongf raw_size = (row + 1) * (size_t)*h;
+    uint8_t *const raw = malloc(raw_size);
+    if (uncompress(raw, &raw_size, idat, (uLong)idat_size) != Z_OK
+        || raw_size < (row + 1) * (size_t)*h) {
+        free(raw);
+        free(idat);
+        free(data);
+        return NULL;
+    }
+    // The filters, in place: each row on the one above it.
+    for (int y = 0; y < *h; y++) {
+        uint8_t *const cur = raw + (row + 1) * y + 1;
+        const uint8_t *const up = y > 0 ? raw + (row + 1) * (y - 1) + 1 : NULL;
+        const int f = raw[(row + 1) * y];
+        for (size_t i = 0; i < row; i++) {
+            const int a = i >= (size_t)bpp ? cur[i - bpp] : 0;
+            const int b = up != NULL ? up[i] : 0;
+            const int c = (up != NULL && i >= (size_t)bpp) ? up[i - bpp] : 0;
+            int pred = 0;
+            if (f == 1) {
+                pred = a;
+            } else if (f == 2) {
+                pred = b;
+            } else if (f == 3) {
+                pred = (a + b) / 2;
+            } else if (f == 4) {
+                const int p = a + b - c;
+                const int pa = abs(p - a);
+                const int pb = abs(p - b);
+                const int pc = abs(p - c);
+                pred = (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+            }
+            cur[i] = (uint8_t)(cur[i] + pred);
+        }
+    }
+    uint8_t *const out = malloc((size_t)*w * *h * channels);
+    for (int y = 0; y < *h; y++) {
+        const uint8_t *const cur = raw + (row + 1) * y + 1;
+        for (int x = 0; x < *w * channels; x++) {
+            out[(size_t)y * *w * channels + x] = depth == 16 ? cur[x * 2] : cur[x];
+        }
+    }
+    *ch = channels;
+    free(raw);
+    free(idat);
+    free(data);
+    return out;
+}
+
+// One channel of an image as a 256 by 256 picture: a box mean down, a
+// bilinear up.
+static void Resample256(
+    const uint8_t *const src, const int w, const int h, const int ch,
+    const int channel, float *const dst)
+{
+    for (int y = 0; y < 256; y++) {
+        for (int x = 0; x < 256; x++) {
+            const float fx0 = (float)x * w / 256.0f;
+            const float fx1 = (float)(x + 1) * w / 256.0f;
+            const float fy0 = (float)y * h / 256.0f;
+            const float fy1 = (float)(y + 1) * h / 256.0f;
+            float sum = 0.0f;
+            float wsum = 0.0f;
+            for (int sy = (int)fy0; sy < (int)ceilf(fy1) && sy < h; sy++) {
+                for (int sx = (int)fx0; sx < (int)ceilf(fx1) && sx < w; sx++) {
+                    const float ox = fminf((float)sx + 1.0f, fx1) - fmaxf((float)sx, fx0);
+                    const float oy = fminf((float)sy + 1.0f, fy1) - fmaxf((float)sy, fy0);
+                    const float wt = ox * oy;
+                    if (wt > 0.0f) {
+                        sum += wt * src[((size_t)sy * w + sx) * ch + channel];
+                        wsum += wt;
+                    }
+                }
+            }
+            dst[y * 256 + x] = wsum > 0.0f ? sum / wsum : 128.0f;
+        }
+    }
+}
+
+static void PngChunk(
+    FILE *const f, const char *const type, const uint8_t *const data,
+    const uint32_t size)
+{
+    uint8_t head[8] = { (uint8_t)(size >> 24), (uint8_t)(size >> 16),
+                        (uint8_t)(size >> 8), (uint8_t)size };
+    memcpy(head + 4, type, 4);
+    fwrite(head, 1, 8, f);
+    uLong crc = crc32(0L, (const Bytef *)type, 4);
+    if (size > 0) {
+        fwrite(data, 1, size, f);
+        crc = crc32(crc, data, size);
+    }
+    const uint8_t tail[4] = { (uint8_t)(crc >> 24), (uint8_t)(crc >> 16),
+                              (uint8_t)(crc >> 8), (uint8_t)crc };
+    fwrite(tail, 1, 4, f);
+}
+
+// A 16-bit 1555 page as a PNG, the see-through texels with no alpha.
+static void WritePagePng(const char *const path, const uint16_t *const texels)
+{
+    const int w = 256;
+    const size_t row = 1 + (size_t)w * 4;
+    uint8_t *const raw = malloc(row * w);
+    for (int y = 0; y < w; y++) {
+        uint8_t *const out = raw + row * y;
+        out[0] = 0;
+        for (int x = 0; x < w; x++) {
+            const uint16_t t = texels[y * 256 + x];
+            const int r = (t >> 10) & 31;
+            const int g = (t >> 5) & 31;
+            const int b = t & 31;
+            out[1 + x * 4] = (uint8_t)((r << 3) | (r >> 2));
+            out[2 + x * 4] = (uint8_t)((g << 3) | (g >> 2));
+            out[3 + x * 4] = (uint8_t)((b << 3) | (b >> 2));
+            out[4 + x * 4] = (t & 0x8000) != 0 ? 255 : 0;
+        }
+    }
+    uLongf zsize = compressBound((uLong)(row * w));
+    uint8_t *const z = malloc(zsize);
+    if (compress2(z, &zsize, raw, (uLong)(row * w), 6) == Z_OK) {
+        FILE *const f = fopen(path, "wb");
+        if (f != NULL) {
+            static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+            fwrite(sig, 1, 8, f);
+            const uint8_t ihdr[13] = { 0, 0, 1, 0, 0, 0, 1, 0, 8, 6, 0, 0, 0 };
+            PngChunk(f, "IHDR", ihdr, 13);
+            PngChunk(f, "IDAT", z, (uint32_t)zsize);
+            PngChunk(f, "IEND", NULL, 0);
+            fclose(f);
+        }
+    }
+    free(z);
+    free(raw);
+}
+typedef struct {
+    int flat;
+    char level[64];
+    int page;
+    int x0, y0, x1, y1;
+    float factor;
+} OVERRIDE;
+#define MAX_OVERRIDES 512
+static OVERRIDE m_Over[MAX_OVERRIDES];
+static int m_OverCount = 0;
+static char m_LevelName[64] = "";
+
+static void LoadOverrides(const char *const path)
+{
+    FILE *const fp = fopen(path, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "texvq: cannot read %s\n", path);
+        return;
+    }
+    char line[256];
+    while (fgets(line, sizeof(line), fp) != NULL && m_OverCount < MAX_OVERRIDES) {
+        char kind[16];
+        OVERRIDE o = { 0 };
+        o.factor = 1.0f;
+        const int got = sscanf(
+            line, "%15s %63s %d %d %d %d %d %f", kind, o.level, &o.page, &o.x0,
+            &o.y0, &o.x1, &o.y1, &o.factor);
+        if (got >= 7 && strcmp(kind, "flat") == 0) {
+            o.flat = 1;
+            m_Over[m_OverCount++] = o;
+        } else if (got >= 8 && strcmp(kind, "scale") == 0) {
+            m_Over[m_OverCount++] = o;
+        }
+    }
+    fclose(fp);
+}
 static BUMP *m_Bumps = NULL;
 static int m_BumpCount = 0;
 
@@ -351,9 +589,12 @@ static void AddBump(const int32_t page, const uint16_t *const texels)
     if (m_BumpPath == NULL) {
         return;
     }
+    // Every page that has a texture of the level, not only those a room's own
+    // faces use: the relief goes on the static meshes the room's lights reach,
+    // too, and the game made those pages in play, a stall of a frame each.
     int used = 0;
     for (int32_t i = 0; i < m_Level.count && !used; i++) {
-        used = m_Level.textures[i].page == page && m_Level.used[i] != 0;
+        used = m_Level.textures[i].page == page;
     }
     const uint32_t hash = Hash(texels, PAGE_SIZE * 2);
     for (int i = 0; used && i < m_BumpCount; i++) {
@@ -362,17 +603,21 @@ static void AddBump(const int32_t page, const uint16_t *const texels)
     if (!used) {
         return;
     }
+    if (m_PngDir != NULL) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%08x.png", m_PngDir, (unsigned)hash);
+        WritePagePng(path, texels);
+    }
     static uint8_t height[BUMP_TEXELS];
     static uint16_t owner[BUMP_TEXELS];
     int32_t lo = 255;
     int32_t hi = 0;
     for (int y = 0; y < DC_BUMP_SIZE; y++) {
         for (int x = 0; x < DC_BUMP_SIZE; x++) {
-            const uint16_t *const t = &texels[y * 2 * PAGE_W + x * 2];
-            const uint16_t block[4] = { t[0], t[PAGE_W], t[1], t[PAGE_W + 1] };
             int32_t luma;
+            // A relief texel for each of the page's: its own brightness.
             const uint8_t h =
-                DC_Bump_Height(DC_Bump_HalfTexel(block, false), false, &luma);
+                DC_Bump_Height(texels[y * PAGE_W + x], false, &luma);
             height[y * DC_BUMP_SIZE + x] = h;
             if (h != 0) {
                 lo = luma < lo ? luma : lo;
@@ -390,16 +635,166 @@ static void AddBump(const int32_t page, const uint16_t *const texels)
                 texture->corners);
         }
     }
+    // A relief made by hand, if there is one for this page.
+    static float custom[3][BUMP_TEXELS];
+    int custom_kind = 0; // 1 heights, 2 normals
+    if (m_CustomDir != NULL) {
+        char cpath[512];
+        snprintf(cpath, sizeof(cpath), "%s/%08x.png", m_CustomDir, (unsigned)hash);
+        int cw = 0;
+        int chh = 0;
+        int cch = 0;
+        uint8_t *const img = ReadPng(cpath, &cw, &chh, &cch);
+        if (img != NULL) {
+            if (cch >= 3) {
+                for (int k = 0; k < 3; k++) {
+                    Resample256(img, cw, chh, cch, k, custom[k]);
+                }
+                double mr = 0, mg = 0, mb = 0;
+                for (int i = 0; i < BUMP_TEXELS; i++) {
+                    mr += custom[0][i];
+                    mg += custom[1][i];
+                    mb += custom[2][i];
+                }
+                mr /= BUMP_TEXELS;
+                mg /= BUMP_TEXELS;
+                mb /= BUMP_TEXELS;
+                // Normals are blue (up) with red and green about the middle; a grey
+                // picture (all three alike), however bright, is heights.
+                custom_kind = (mb > 150 && mb - fmax(mr, mg) > 40 && fabs(mr - 128) < 40
+                               && fabs(mg - 128) < 40)
+                    ? 2
+                    : 1;
+                if (custom_kind == 1) {
+                    for (int i = 0; i < BUMP_TEXELS; i++) {
+                        custom[0][i] = 0.299f * custom[0][i] + 0.587f * custom[1][i]
+                            + 0.114f * custom[2][i];
+                    }
+                }
+            } else {
+                Resample256(img, cw, chh, cch, 0, custom[0]);
+                custom_kind = 1;
+            }
+            free(img);
+            m_CustomCount++;
+        }
+    }
+    if (custom_kind == 1) {
+        for (int i = 0; i < BUMP_TEXELS; i++) {
+            if (height[i] != 0) {
+                const float v = custom[0][i];
+                height[i] = (uint8_t)(v < 1.0f ? 1 : v > 255.0f ? 255 : (int)(v + 0.5f));
+            }
+        }
+    }
+    DC_BumpCoherenceOn = custom_kind == 0;
+    if (!m_NoDetail && custom_kind == 0) {
+        static uint8_t scratch[DC_BUMP_DETAIL_SCRATCH];
+        DC_Bump_Detail(height, owner, scratch);
+    }
+    static uint8_t flat[BUMP_TEXELS];
+    memset(flat, 0, sizeof(flat));
+    for (int k = 0; k < m_OverCount; k++) {
+        const OVERRIDE *const o = &m_Over[k];
+        if (o->page != page || strcmp(o->level, m_LevelName) != 0) {
+            continue;
+        }
+        const int x0 = o->x0 < 0 ? 0 : o->x0;
+        const int y0 = o->y0 < 0 ? 0 : o->y0;
+        const int x1 = o->x1 >= DC_BUMP_SIZE ? DC_BUMP_SIZE - 1 : o->x1;
+        const int y1 = o->y1 >= DC_BUMP_SIZE ? DC_BUMP_SIZE - 1 : o->y1;
+        int sum = 0;
+        int n = 0;
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                if (height[y * DC_BUMP_SIZE + x] != 0) {
+                    sum += height[y * DC_BUMP_SIZE + x];
+                    n++;
+                }
+            }
+        }
+        const float mean = n > 0 ? (float)sum / n : 128.0f;
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                const int at = y * DC_BUMP_SIZE + x;
+                if (o->flat) {
+                    flat[at] = 1;
+                } else if (height[at] != 0) {
+                    float h = mean + o->factor * ((float)height[at] - mean);
+                    h = h < 1.0f ? 1.0f : h > 255.0f ? 255.0f : h;
+                    height[at] = (uint8_t)(h + 0.5f);
+                }
+            }
+        }
+    }
+    static float lean[2 * BUMP_TEXELS];
+    DC_Bump_Slopes(height, owner, lean);
+    if (custom_kind == 2) {
+        const char *const flip_env = getenv("TEXVQ_NORMAL_FLIP");
+        const char *const scale_env = getenv("TEXVQ_NORMAL_SCALE");
+        const int flip = flip_env != NULL && flip_env[0] == '1';
+        const float scale = scale_env != NULL ? (float)atof(scale_env) : 1.0f;
+        for (int i = 0; i < BUMP_TEXELS; i++) {
+            lean[2 * i] = 0.0f;
+            lean[2 * i + 1] = 0.0f;
+            if (height[i] == 0) {
+                continue;
+            }
+            const float nx = custom[0][i] / 127.5f - 1.0f;
+            const float ny = custom[1][i] / 127.5f - 1.0f;
+            float nz = custom[2][i] / 127.5f - 1.0f;
+            nz = nz < 0.15f ? 0.15f : nz;
+            float sx = nx / nz * scale;
+            float sy = (flip ? ny : -ny) / nz * scale;
+            const float len = sqrtf(sx * sx + sy * sy);
+            if (len > 1.0e-6f) {
+                const float k = DC_BUMP_LEAN_CAP * tanhf(len / DC_BUMP_LEAN_CAP) / len;
+                sx *= k;
+                sy *= k;
+            }
+            lean[2 * i] = sx;
+            lean[2 * i + 1] = sy;
+        }
+    }
+    DC_BumpCoherenceOn = 1;
+    if (m_DumpDir != NULL) {
+        static uint8_t pic[BUMP_TEXELS];
+        const char *const names[3] = { "luma", "height", "lean" };
+        for (int k = 0; k < 3; k++) {
+            for (int y = 0; y < DC_BUMP_SIZE; y++) {
+                for (int x = 0; x < DC_BUMP_SIZE; x++) {
+                    const int at = y * DC_BUMP_SIZE + x;
+                    float v;
+                    if (k == 0) {
+                        int32_t luma;
+                        DC_Bump_Height(texels[y * PAGE_W + x], false, &luma);
+                        v = (float)luma;
+                    } else if (k == 1) {
+                        v = (float)height[at];
+                    } else {
+                        v = sqrtf(lean[2 * at] * lean[2 * at] + lean[2 * at + 1] * lean[2 * at + 1]) * (255.0f / 3.0f);
+                    }
+                    pic[at] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                }
+            }
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%08x_%s.pgm", m_DumpDir, (unsigned)hash, names[k]);
+            FILE *const f = fopen(path, "wb");
+            if (f != NULL) {
+                fprintf(f, "P5 %d %d 255\n", DC_BUMP_SIZE, DC_BUMP_SIZE);
+                fwrite(pic, 1, BUMP_TEXELS, f);
+                fclose(f);
+            }
+        }
+    }
     m_Bumps = realloc(m_Bumps, sizeof(BUMP) * (m_BumpCount + 1));
     BUMP *const bump = &m_Bumps[m_BumpCount++];
     bump->hash = hash;
     for (int y = 0; y < DC_BUMP_SIZE; y++) {
         for (int x = 0; x < DC_BUMP_SIZE; x++) {
-            float nx;
-            float ny;
-            bump->texels[Twiddle(x, y)] =
-                DC_Bump_Slope(height, owner, x, y, &nx, &ny)
-                ? DC_Bump_Encode(nx, ny)
+            const int at = y * DC_BUMP_SIZE + x;
+            bump->texels[Twiddle(x, y)] = !flat[at] && height[at] != 0
+                ? DC_Bump_Encode(lean[2 * at], lean[2 * at + 1])
                 : DC_BUMP_FLAT;
         }
     }
@@ -846,7 +1241,8 @@ static int WriteBumps(void)
         return 1;
     }
     const uint32_t count = m_BumpCount;
-    fwrite("TBP1", 1, 4, fp);
+    // "TBP2": the relief is 256 by 256 a page (131072 bytes); "TBP1" was 128.
+    fwrite("TBP2", 1, 4, fp);
     fwrite(&count, 4, 1, fp);
     fwrite(index, sizeof(*index), m_BumpCount, fp);
     for (int i = 0; i < m_BumpCount; i++) {
@@ -854,7 +1250,7 @@ static int WriteBumps(void)
     }
     fclose(fp);
     free(index);
-    printf("texvq: %d page reliefs\n", m_BumpCount);
+    printf("texvq: %d page reliefs (%d of them made by hand)\n", m_BumpCount, m_CustomCount);
     return 0;
 }
 
@@ -1157,6 +1553,31 @@ int main(int argc, char **argv)
         m_BumpPath = argv[2];
         argc -= 2;
         argv += 2;
+        while (argc >= 2 && argv[1][0] == '-') {
+            if (strcmp(argv[1], "-C") == 0 && argc >= 3) {
+                m_CustomDir = argv[2];
+                argc -= 2;
+                argv += 2;
+            } else if (strcmp(argv[1], "-P") == 0 && argc >= 3) {
+                m_PngDir = argv[2];
+                argc -= 2;
+                argv += 2;
+            } else if (strcmp(argv[1], "-D") == 0 && argc >= 3) {
+                m_DumpDir = argv[2];
+                argc -= 2;
+                argv += 2;
+            } else if (strcmp(argv[1], "-d0") == 0) {
+                m_NoDetail = 1;
+                argc -= 1;
+                argv += 1;
+            } else if (strcmp(argv[1], "-o") == 0 && argc >= 3) {
+                LoadOverrides(argv[2]);
+                argc -= 2;
+                argv += 2;
+            } else {
+                break;
+            }
+        }
     }
     if (argc < 3) {
         fprintf(
@@ -1172,6 +1593,18 @@ int main(int argc, char **argv)
             fprintf(stderr, "texvq: cannot read %s\n", argv[i]);
             free(data);
             return 1;
+        }
+        {
+            const char *base = strrchr(argv[i], '/');
+            base = base != NULL ? base + 1 : argv[i];
+            int n = 0;
+            while (base[n] != '\0' && base[n] != '.' && n < 63) {
+                m_LevelName[n] = (char)((base[n] >= 'A' && base[n] <= 'Z')
+                                            ? base[n] + 32
+                                            : base[n]);
+                n++;
+            }
+            m_LevelName[n] = '\0';
         }
         if (memcmp(data, "TRXJ", 4) == 0 || memcmp(data, "TRXI", 4) == 0) {
             ReadInjection(data, size);

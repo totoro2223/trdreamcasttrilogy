@@ -9,6 +9,7 @@
 // fixed 640x480 screen.
 
 #include "dc_games.h"
+#include "render/bump_tune.h"
 #include "render/pvr.h"
 #include "vmu_screen.h"
 
@@ -111,6 +112,8 @@ static bool m_WaterPressed = false;
 // L + R + Up: the debug bounding boxes on and off.
 static bool m_BoxesHeld = false;
 static bool m_BoxesPressed = false;
+// L + R + X: the relief's values changed with the d-pad (render/bump_tune.h).
+static bool m_TuneHeld = false;
 static bool m_DebugViewHeld = false;
 static bool m_DebugViewPressed = false;
 static bool m_DebugModeHeld = false;
@@ -352,13 +355,20 @@ static void M_PollController(void)
         m_BoxesPressed = true;
     }
     m_BoxesHeld = boxes;
+    const bool tune_toggle = chord && (b & CONT_X);
+    if (tune_toggle && !m_TuneHeld) {
+        DC_BumpTune_Toggle();
+    }
+    m_TuneHeld = tune_toggle;
+    // While it is on, the d-pad, A and B are its.
+    const bool tuning = DC_BumpTune_Poll(b);
     const bool tr3 = g_TRVersion >= 3;
-    const bool a = b & CONT_A;
+    const bool a = (b & CONT_A) && !tuning;
     const bool y = b & CONT_Y;
 
     M_SetButton(SDL_CONTROLLER_BUTTON_A, a && !(tr3 && l));
-    M_SetButton(SDL_CONTROLLER_BUTTON_B, (b & CONT_B) && !chord);
-    M_SetButton(SDL_CONTROLLER_BUTTON_X, b & CONT_X);
+    M_SetButton(SDL_CONTROLLER_BUTTON_B, (b & CONT_B) && !chord && !tuning);
+    M_SetButton(SDL_CONTROLLER_BUTTON_X, (b & CONT_X) && !chord);
     M_SetButton(SDL_CONTROLLER_BUTTON_Y, y && !(tr3 && l));
     M_SetButton(SDL_CONTROLLER_BUTTON_PADDLE1, chord);
     M_SetButton(SDL_CONTROLLER_BUTTON_PADDLE2, tr3 && l && y);
@@ -369,10 +379,10 @@ static void M_PollController(void)
     M_SetButton(SDL_CONTROLLER_BUTTON_BACK, b & CONT_D);
     M_SetButton(SDL_CONTROLLER_BUTTON_LEFTSTICK, b & CONT_Z);
     M_SetButton(SDL_CONTROLLER_BUTTON_RIGHTSTICK, b & CONT_C);
-    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_UP, (b & CONT_DPAD_UP) && !chord);
-    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_DOWN, (b & CONT_DPAD_DOWN) && !chord);
-    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT, b & CONT_DPAD_LEFT);
-    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, b & CONT_DPAD_RIGHT);
+    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_UP, (b & CONT_DPAD_UP) && !chord && !tuning);
+    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_DOWN, (b & CONT_DPAD_DOWN) && !chord && !tuning);
+    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT, (b & CONT_DPAD_LEFT) && !tuning);
+    M_SetButton(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, (b & CONT_DPAD_RIGHT) && !tuning);
     M_SetButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, l);
     M_SetButton(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, r && !l);
 

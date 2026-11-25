@@ -31,6 +31,7 @@
 #include <trx/game/ui/text.h>
 #include <trx/version.h>
 #include <platform/dreamcast/dc_probe.h>
+#include <platform/dreamcast/render/bump_tune.h>
 #include <platform/dreamcast/render/pvr.h>
 #include "vmu.h"
 
@@ -526,6 +527,14 @@ static bool M_OnTick(
             (int)(g_DC_PhaseUs[4] / 1000), (int)(g_DC_PhaseUs[4] / 100 % 10));
         for (int32_t i = 0; i < 6; i++) {
             M_Push(M_TOP_LEFT, -1, 0.0f, info[i], 1.0f);
+        }
+    }
+    {
+        // The relief tuning's values, while it is on (render/bump_tune.h).
+        static char tune[3][40];
+        const int32_t lines = DC_BumpTune_Text(tune);
+        for (int32_t i = 0; i < lines; i++) {
+            M_Push(M_CENTER, -1, 0.0f, tune[i], 1.0f);
         }
     }
 #if defined(TRX_DC_PROBES)

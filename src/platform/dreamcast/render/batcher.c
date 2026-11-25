@@ -17,6 +17,7 @@
 
 #include "cel.h"
 #include "pvr.h"
+#include "bump_tune.h"
 #include "shadow.h"
 #include "uniform_layouts.h"
 
@@ -513,8 +514,8 @@ _Static_assert(
 // Relief (bump mapping): the room faces nearer the camera than this take
 // their page's relief (DC_BLEND_BUMP), lit from the room's light nearest
 // them, fading out over the last stretch.
-#define M_BUMP_RANGE (4.0f * WALL_L)
-#define M_BUMP_FADE (3.0f * WALL_L)
+#define M_BUMP_RANGE (g_DC_Bump.range * WALL_L)
+#define M_BUMP_FADE (g_DC_Bump.fade * WALL_L)
 // The relief is looked for in rooms and faces up to this many times the
 // range from the camera, where a flash or other passing light may reach.
 #define M_BUMP_LIGHT_REACH 3.0f
@@ -528,28 +529,28 @@ _Static_assert(
 // lit from, of the way to itself: the rest stays with the room light. The
 // relief is lit by it where it reaches, but it does not slide about as it
 // moves, which a full turn made the texture do.
-#define M_BUMP_PASSING_TILT 0.2f
+#define M_BUMP_PASSING_TILT (g_DC_Bump.tilt)
 // How far off the sun is taken to lie, for the direction its relief is lit from.
 #define M_BUMP_SUN_DISTANCE (64.0f * WALL_L)
 // How deep the relief's shade runs, of the whole colour.
-#define M_BUMP_DEPTH 0.765f
+#define M_BUMP_DEPTH (g_DC_Bump.depth)
 // How much of the colour a flat texel of the relief loses, of the whole.
-#define M_BUMP_DIM 0.0f
+#define M_BUMP_DIM (g_DC_Bump.dim)
 // The least of the colour a slope turned from the light keeps (M_BumpAt).
-#define M_BUMP_FLOOR 0.45f
+#define M_BUMP_FLOOR (g_DC_Bump.shade_floor)
 // How bright the slopes turned to the light shine, of the whole.
-#define M_BUMP_GLOW 0.8f
+#define M_BUMP_GLOW (g_DC_Bump.glow)
 // Of the shine's spot, what a flat texel takes; the slopes turned to the
 // light take up to the whole (M_BumpAt).
-#define M_BUMP_SHINE_FLAT 0.2f
+#define M_BUMP_SHINE_FLAT (g_DC_Bump.shine_flat)
 // The shine shows the relief whole nearer than this and none from this far.
-#define M_BUMP_SHINE_DETAIL_NEAR (1.0f * WALL_L)
-#define M_BUMP_SHINE_DETAIL_FAR (2.0f * WALL_L)
+#define M_BUMP_SHINE_DETAIL_NEAR (g_DC_Bump.detail_near * WALL_L)
+#define M_BUMP_SHINE_DETAIL_FAR (g_DC_Bump.detail_far * WALL_L)
 // The shine reaches less far than the shade (it costs a second pass of
 // the same faces, and is the part that cannot be kept from one frame to the
 // next): it fades out over its own, shorter stretch.
-#define M_BUMP_GLOW_RANGE (2.4f * WALL_L)
-#define M_BUMP_GLOW_FADE (1.8f * WALL_L)
+#define M_BUMP_GLOW_RANGE (g_DC_Bump.glow_range * WALL_L)
+#define M_BUMP_GLOW_FADE (g_DC_Bump.glow_fade * WALL_L)
 // A face this far or farther has the relief of its middle at all its corners.
 #define M_BUMP_FACE_FAR (2.5f * WALL_L)
 // The most RAM the corners' kept relief may take, over every room.
@@ -8962,19 +8963,33 @@ _Static_assert(offsetof(M_BUMP_FRAME, tl) == 36, "bump_sh4.S layout");
 _Static_assert(offsetof(M_XVERT, argb) == 24, "bump_sh4.S layout");
 extern uint32_t dc_bump_vertex(M_BUMPRUN *run);
 
-static const float m_BumpK[37] = {
-    1.0f, 4.0f, 8.0f * WALL_L, M_BUMP_PASSING_TILT, 1.0e-6f, M_BUMP_RANGE,
-    1.0f / M_BUMP_FADE, M_BUMP_GLOW_RANGE, 1.0f / M_BUMP_GLOW_FADE,
-    M_BUMP_DEPTH, M_BUMP_GLOW, 1.0f / 255.0f, 255.0f, 0.5f, 1.0e-4f, 0.30f,
-    1.0f / 0.45f, 0.5f, 1.0f / 0.4f, 3.0f, 2.0f, M_BUMP_MIN_SIN,
-    -0.0464964749f, 0.15931422f, 0.327622764f, (float)(M_PI / 2.0),
-    (float)M_PI, 2.0f * (float)M_PI, 256.0f / (2.0f * (float)M_PI),
-    M_BUMP_FLOOR, 1.0f - M_BUMP_FLOOR, M_BUMP_DIM, 1.0f / M_BUMP_DEPTH,
-    1.0e-12f, // 33: what M_Sqrt0 adds before its fsrra
-    M_BUMP_SHINE_DETAIL_FAR, // 34
-    1.0f / (M_BUMP_SHINE_DETAIL_FAR - M_BUMP_SHINE_DETAIL_NEAR), // 35
-    M_BUMP_SHINE_FLAT, // 36
-};
+static float m_BumpK[37];
+static uint32_t m_BumpKVersion = UINT32_MAX;
+
+// The table, from the values now set (bump_tune.h): made again when they change.
+static void M_BumpKRefresh(void)
+{
+    if (m_BumpKVersion == g_DC_Bump.version) {
+        return;
+    }
+    m_BumpKVersion = g_DC_Bump.version;
+    const float k[37] = {
+        1.0f, 4.0f, 8.0f * WALL_L, M_BUMP_PASSING_TILT, 1.0e-6f, M_BUMP_RANGE,
+        1.0f / M_BUMP_FADE, M_BUMP_GLOW_RANGE, 1.0f / M_BUMP_GLOW_FADE,
+        M_BUMP_DEPTH, M_BUMP_GLOW, 1.0f / 255.0f, 255.0f, 0.5f, 1.0e-4f, 0.30f,
+        1.0f / 0.45f, 0.5f, 1.0f / 0.4f, 3.0f, 2.0f, M_BUMP_MIN_SIN,
+        -0.0464964749f, 0.15931422f, 0.327622764f, (float)(M_PI / 2.0),
+        (float)M_PI, 2.0f * (float)M_PI, 256.0f / (2.0f * (float)M_PI),
+        M_BUMP_FLOOR, 1.0f - M_BUMP_FLOOR, M_BUMP_DIM, 1.0f / M_BUMP_DEPTH,
+        1.0e-12f, // 33: what M_Sqrt0 adds before its fsrra
+        M_BUMP_SHINE_DETAIL_FAR, // 34
+        1.0f
+            / MAX(M_BUMP_SHINE_DETAIL_FAR - M_BUMP_SHINE_DETAIL_NEAR,
+                  1.0f), // 35
+        M_BUMP_SHINE_FLAT, // 36
+    };
+    memcpy(m_BumpK, k, sizeof(m_BumpK));
+}
 
 // A room lit by the place its vertices are brightest in (no light of its own)
 // shows the relief's shade twice as deep: it was too faint to see. Set per
@@ -9139,6 +9154,8 @@ static uint32_t M_BumpVertex(
 // polygon.
 #define M_BUMP_MIN_FADE 0.12f
 #define M_BUMP_SPLIT 4
+// ... and for the shine, which is on every face near the camera.
+#define M_BUMP_SPLIT_GLOW 2
 // How far apart the directions at a face's corners may lie (of 256), for each
 // to keep its own.
 #define M_BUMP_SPLIT_Q 96
@@ -9152,7 +9169,8 @@ static bool M_EmitBumpGrid(
     MESH_BATCHER *const batcher, const M_BINDING *const bind,
     const M_BUMP_LIGHTS *const lights, const M_BUMP_FRAME *const frame,
     const OUTPUT_MESH_INDEX *const tri, const bool glow,
-    const uint32_t *const corner_k)
+    const uint32_t *const corner_k, uint32_t *const keep_k,
+    const int32_t keep_mode, bool *const stored)
 {
     const OUTPUT_MESH_INDEX strip[4] = { tri[0], tri[1], tri[2], tri[5] };
     const M_XVERT *const xv = batcher->xverts;
@@ -9177,14 +9195,17 @@ static bool M_EmitBumpGrid(
     }
     float uv[4][2];
     M_GetFaceUVs(batcher, bind, strip, 4, uv);
+    // The shine's highlight is a spot that the coarser grid shows as well; the
+    // light of a passing light across a big face needs the finer one.
+    const int32_t split = glow ? M_BUMP_SPLIT_GLOW : M_BUMP_SPLIT;
     enum { M_N = M_BUMP_SPLIT + 1 };
     M_XVERT grid[M_N * M_N];
     float grid_uv[M_N * M_N][2] = {};
     uint32_t grid_k[M_N * M_N];
-    for (int32_t row = 0; row < M_N; row++) {
-        const float t = (float)row / M_BUMP_SPLIT;
-        for (int32_t col = 0; col < M_N; col++) {
-            const float s = (float)col / M_BUMP_SPLIT;
+    for (int32_t row = 0; row <= split; row++) {
+        const float t = (float)row / split;
+        for (int32_t col = 0; col <= split; col++) {
+            const float s = (float)col / split;
             // The strip's corners 0, 1, 2, 3 lie at (0,0), (1,0), (0,1), (1,1).
             // The face under it is drawn as two triangles either side of the
             // 1-2 diagonal, each flat in its coordinates: a point takes its
@@ -9232,9 +9253,15 @@ static bool M_EmitBumpGrid(
             }
             g->argb = (((lo + 0x00020002u) >> 2) & 0x00FF00FFu)
                 | ((((hi + 0x00020002u) >> 2) & 0x00FF00FFu) << 8);
+            // The tick's first frame worked this point out: the frames after
+            // it take that (keep_mode 2).
+            if (keep_mode == 2) {
+                grid_k[row * M_N + col] = keep_k[row * M_N + col];
+                continue;
+            }
             // A corner of the grid is the face's own: its relief is known.
-            const int32_t corner = (row == 0 || row == M_BUMP_SPLIT)
-                    && (col == 0 || col == M_BUMP_SPLIT)
+            const int32_t corner = (row == 0 || row == split)
+                    && (col == 0 || col == split)
                 ? (row != 0) * 2 + (col != 0)
                 : -1;
             if (corner_k != nullptr && corner >= 0) {
@@ -9247,19 +9274,23 @@ static bool M_EmitBumpGrid(
                 M_BumpVertex(lights, frame, g, glow, &fade, &by_light);
         }
     }
+    if (keep_mode == 1) {
+        memcpy(keep_k, grid_k, sizeof(grid_k));
+        *stored = true;
+    }
     // Each row of pieces goes out as one strip of shared corners (10 vertices
     // for 4 pieces, not 16: the translucent list overflowed with them): the
     // same triangles, split along the same diagonal, with the same values. A
     // piece with its Q evened out breaks the strip and goes out on its own,
     // as one behind the near plane is left out.
-    for (int32_t row = 0; row < M_BUMP_SPLIT; row++) {
+    for (int32_t row = 0; row < split; row++) {
         int32_t run = -1; // the strip's first piece
-        for (int32_t col = 0; col <= M_BUMP_SPLIT; col++) {
+        for (int32_t col = 0; col <= split; col++) {
             const int32_t at[4] = {
                 row * M_N + col, row * M_N + col + 1, (row + 1) * M_N + col,
                 (row + 1) * M_N + col + 1,
             };
-            bool behind = col == M_BUMP_SPLIT;
+            bool behind = col == split;
             for (int32_t c = 0; c < 4 && !behind; c++) {
                 behind |= grid[at[c]].z < m_Frame.near_z;
             }
@@ -9341,6 +9372,7 @@ static bool M_EmitBumpGrid(
 // A face with its relief worked out, waiting to be drawn.
 typedef struct {
     int32_t first;
+    int32_t id; // the place in the room's list of indices (first is the run's)
     int32_t page;
     int32_t step;
     uint32_t k[6];
@@ -9355,6 +9387,69 @@ typedef struct {
 // Flushed whenever full: 1024 entries were 45K of RAM for no fewer draws.
 #define M_BUMP_QUEUE 256
 static M_BUMP_ENTRY *m_BumpQueue = nullptr; // malloc'd at the first relief
+
+// The relief the first frame of a tick worked out for a face, kept for the
+// frame after it: the relief follows the camera, which turns little in half a
+// tick, and it is the shine and the shade a passing light touches that cost.
+// Keyed by the room's binding and the face's place; good for the tick it was
+// made in (TRX_DC_ASMOFF3 bit 1: not used).
+#define M_BUMP_KEEP 256
+typedef struct {
+    const M_BINDING *bind;
+    int32_t id;
+    uint32_t epoch;
+    bool glow;
+    bool hidden;
+    bool has_grid;
+    M_BUMP_ENTRY e;
+    uint32_t grid_k[(M_BUMP_SPLIT + 1) * (M_BUMP_SPLIT + 1)];
+} M_BUMP_KEPT;
+static M_BUMP_KEPT *m_BumpKept = nullptr;
+static uint32_t m_BumpEpoch = 1;
+static DC_REPLAY_MODE m_BumpMode = DC_REPLAY_OFF;
+
+void DC_Batcher_BumpNewTick(void)
+{
+    m_BumpEpoch++;
+}
+
+// The kept relief of a face, if there is one for this tick; made (empty) when
+// make is set.
+static M_BUMP_KEPT *M_BumpKeptSlot(
+    const M_BINDING *const bind, const int32_t id, const bool glow,
+    const bool make)
+{
+    if (m_BumpMode == DC_REPLAY_OFF || (g_DC_AsmOff3 & 1) != 0) {
+        return nullptr;
+    }
+    if (m_BumpKept == nullptr) {
+        if (!make) {
+            return nullptr;
+        }
+        m_BumpKept = calloc(M_BUMP_KEEP, sizeof(M_BUMP_KEPT));
+        if (m_BumpKept == nullptr) {
+            return nullptr;
+        }
+    }
+    const uint32_t h = (((uint32_t)(uintptr_t)bind >> 4) * 2654435761u
+                        + (uint32_t)id * 40503u + (uint32_t)glow)
+        % M_BUMP_KEEP;
+    M_BUMP_KEPT *const slot = &m_BumpKept[h];
+    if (slot->bind == bind && slot->id == id && slot->glow == glow
+        && slot->epoch == m_BumpEpoch) {
+        return slot;
+    }
+    if (!make) {
+        return nullptr;
+    }
+    slot->bind = bind;
+    slot->id = id;
+    slot->glow = glow;
+    slot->epoch = m_BumpEpoch;
+    slot->hidden = false;
+    slot->has_grid = false;
+    return slot;
+}
 
 static int M_BumpEntryOrder(const void *const a, const void *const b)
 {
@@ -9394,13 +9489,26 @@ static void M_FlushBump(
         // its highlight is a spot and not the whole face, and does not change
         // its look at some distance as the camera comes and goes.
         M_BUMP_FRAME frame;
+        M_BUMP_KEPT *const kept = quad ? M_BumpKeptSlot(bind, e->id, glow, false)
+                                       : nullptr;
+        const int32_t keep_mode = kept == nullptr ? 0
+            : m_BumpMode == DC_REPLAY_PLAY       ? (kept->has_grid ? 2 : 0)
+            : m_BumpMode == DC_REPLAY_RECORD     ? 1
+                                                 : 0;
+        bool stored = false;
         if (quad
             && (glow || (e->max_by_light > M_BUMP_SPLIT_LIGHT
                          && e->z_min < M_BUMP_SPLIT_RANGE))
             && M_BumpFrame(bind, batcher->xverts, tri, &frame)
             && M_EmitBumpGrid(
                 batcher, bind, lights, &frame, tri, glow,
-                e->corner_ok ? e->corner_k : nullptr)) {
+                e->corner_ok ? e->corner_k : nullptr,
+                kept != nullptr ? kept->grid_k : nullptr, keep_mode,
+                &stored)) {
+            if (stored) {
+                kept->has_grid = true;
+            }
+            g_DC_ProbeUs[glow ? DC_PROBE_B_GRIDG : DC_PROBE_B_GRIDS]++;
             m_BumpFaces++;
             continue;
         }
@@ -9583,9 +9691,8 @@ static void M_EmitBumpRange(
     // The kept relief of this run's corners, by their place in the list.
     M_BUMP_CORNER *const cache =
         bind->bump_cache != nullptr ? bind->bump_cache + first : nullptr;
-    // With no passing light the shade keeps most of its working out from
-    // frame to frame; the shine follows the camera.
-    const bool kept = !glow && cache != nullptr && !lights->any_passing;
+    // The shade keeps most of its working out from frame to frame, but for
+    // the faces a passing light reaches; the shine follows the camera.
     const float reach =
         (glow ? M_BUMP_GLOW_RANGE : M_BUMP_RANGE) * M_BUMP_LIGHT_REACH;
     int32_t queued = 0;
@@ -9608,11 +9715,48 @@ static void M_EmitBumpRange(
         }
         // Too far for any corner to have the least relief, unless a passing
         // light reaches the face (it lights a face at any distance).
-        if (M_BumpNearCap(z_min, glow) < M_BUMP_MIN_FADE
-            && !(lights->any_passing
-                 && M_BumpPassingNear(lights, xv, tri, quad))) {
+        const bool pnear =
+            lights->any_passing && M_BumpPassingNear(lights, xv, tri, quad);
+        g_DC_ProbeUs[DC_PROBE_B_PNEAR] += pnear && !glow;
+        if (M_BumpNearCap(z_min, glow) < M_BUMP_MIN_FADE && !pnear) {
             i += step;
             continue;
+        }
+        // A face no passing light reaches has the relief it has with none:
+        // the kept one.
+        const bool far_mid = !glow && z_min >= M_BUMP_FACE_FAR;
+        const bool kept = !glow && cache != nullptr && !pnear;
+        // What the tick's first frame worked out for a face that costs, the
+        // frames after it take (M_BUMP_KEPT).
+        M_BUMP_KEPT *keep = nullptr;
+        if (glow || (!far_mid && !kept)) {
+            keep = M_BumpKeptSlot(
+                bind, first + i, glow, m_BumpMode == DC_REPLAY_RECORD);
+            if (keep != nullptr && m_BumpMode == DC_REPLAY_PLAY) {
+                if (keep->hidden) {
+                    i += step;
+                    continue;
+                }
+                if (m_BumpQueue == nullptr) {
+                    m_BumpQueue = malloc(sizeof(M_BUMP_ENTRY) * M_BUMP_QUEUE);
+                }
+                M_BUMP_ENTRY *const e = &m_BumpQueue[queued++];
+                *e = keep->e;
+                e->first = i;
+                e->id = first + i;
+                e->page = tri_page;
+                e->z_min = z_min;
+                if (queued == M_BUMP_QUEUE) {
+                    DC_PROBE(
+                        DC_PROBE_B_FLUSH,
+                        M_FlushBump(
+                            batcher, bind, lights, indices, m_BumpQueue, queued,
+                            page, glow));
+                    queued = 0;
+                }
+                i += step;
+                continue;
+            }
         }
         M_BUMP_FRAME frame;
         bool have_frame = false;
@@ -9625,7 +9769,7 @@ static void M_EmitBumpRange(
         float max_by_light = 0.0f;
         bool shown = true;
         bool per_corner = false; // k[] is M_BumpVertex at each corner
-        if (!glow && z_min >= M_BUMP_FACE_FAR) {
+        if (far_mid) {
             // So far off that its corners differ by little: the relief of
             // its middle at all of them.
             have_frame = M_BumpFrame(bind, xv, tri, &frame);
@@ -9670,6 +9814,7 @@ static void M_EmitBumpRange(
                             break;
                         }
                     }
+                    g_DC_ProbeUs[DC_PROBE_B_FILL]++;
                     if (!M_BumpCornerFill(lights, &frame, &xv[tri[c]], e)) {
                         e->lz = M_BUMP_CORNER_OFF;
                     }
@@ -9713,6 +9858,9 @@ static void M_EmitBumpRange(
             }
         }
         if (!shown || max_fade < M_BUMP_MIN_FADE) {
+            if (keep != nullptr) {
+                keep->hidden = true;
+            }
             i += step;
             continue;
         }
@@ -9759,6 +9907,7 @@ static void M_EmitBumpRange(
         }
         M_BUMP_ENTRY *const e = &m_BumpQueue[queued++];
         e->first = i;
+        e->id = first + i;
         e->page = tri_page;
         e->step = step;
         memcpy(e->k, k, sizeof(k));
@@ -9766,16 +9915,23 @@ static void M_EmitBumpRange(
         e->corner_ok = per_corner && quad;
         e->max_by_light = max_by_light;
         e->z_min = z_min;
+        if (keep != nullptr) {
+            keep->e = *e;
+        }
         if (queued == M_BUMP_QUEUE) {
-            M_FlushBump(
-                batcher, bind, lights, indices, m_BumpQueue, queued, page,
-                glow);
+            DC_PROBE(
+                DC_PROBE_B_FLUSH,
+                M_FlushBump(
+                    batcher, bind, lights, indices, m_BumpQueue, queued, page,
+                    glow));
             queued = 0;
         }
         i += step;
     }
-    M_FlushBump(
-        batcher, bind, lights, indices, m_BumpQueue, queued, page, glow);
+    DC_PROBE(
+        DC_PROBE_B_FLUSH,
+        M_FlushBump(
+            batcher, bind, lights, indices, m_BumpQueue, queued, page, glow));
     m_DepthBias = 1.0f;
 }
 
@@ -9904,14 +10060,17 @@ static void M_BumpCacheSync(M_BINDING *const bind, const uint32_t sig)
     }
     if (bind->bump_cache == nullptr) {
         if (m_BumpCacheBytes + bytes > M_BUMP_CACHE_BUDGET) {
+            g_DC_ProbeUs[DC_PROBE_B_NOBUD]++;
             return;
         }
+        g_DC_ProbeUs[DC_PROBE_B_RESET]++;
         bind->bump_cache = Memory_Alloc(bytes);
         bind->bump_count = count;
         m_BumpCacheBytes += bytes;
         bind->bump_sig = 0;
     }
     if (bind->bump_sig != sig) {
+        g_DC_ProbeUs[DC_PROBE_B_RESET]++;
         memset(bind->bump_cache, 0x80, bytes);
         bind->bump_sig = sig;
     }
@@ -9930,8 +10089,10 @@ static void M_EmitBump(
         return;
     }
     const float(*const v)[4] = m_Frame.view;
+    M_BumpKRefresh();
+    m_BumpMode = DC_Replay_GetMode();
     M_BUMP_LIGHTS lights = {};
-    uint32_t sig = 2166136261u;
+    uint32_t sig = 2166136261u ^ (g_DC_Bump.version * 2654435761u);
     const ROOM *const room = inst->room;
     for (int32_t i = 0;
          room != nullptr && i < room->num_lights
@@ -10061,6 +10222,7 @@ static void M_EmitBump(
     }
     // A light whose reach misses the room's bounding sphere gives none of its
     // vertices anything: let go once here, not tested at every vertex.
+    int32_t n_static = 0;
     {
         float mv[4][4];
         float scale;
@@ -10101,16 +10263,20 @@ static void M_EmitBump(
         // A passing light let go here lights none of the room: the room is
         // as with none, and keeps its relief from frame to frame (M_BumpCacheSync).
         any_passing = false;
+        n_static = 0;
         for (int32_t l = 0; l < kept; l++) {
+            n_static += !lights.passing[l];
             any_passing |= lights.passing[l];
             lights.radius_sq[l] = lights.radius[l] * lights.radius[l];
             lights.inv_radius_sq[l] = M_Recip(lights.radius_sq[l]);
         }
         lights.any_passing = any_passing;
     }
-    if (!any_passing) {
-        M_BumpCacheSync(bind, M_SigMix(sig, (float)lights.count) | 1u);
-    }
+    g_DC_ProbeUs[DC_PROBE_B_ROOMS]++;
+    g_DC_ProbeUs[DC_PROBE_B_PASSRM] += any_passing;
+    // The kept relief is of the room's own lights: a passing light changes
+    // only the faces it reaches (M_EmitBumpRange).
+    M_BumpCacheSync(bind, M_SigMix(sig, (float)n_static) | 1u);
     const float glow_limit = any_passing ? M_BUMP_GLOW_RANGE * M_BUMP_LIGHT_REACH
                                          : M_BUMP_GLOW_RANGE;
 
@@ -10128,9 +10294,13 @@ static void M_EmitBump(
                 continue;
             }
             if (range->z_near <= (pass == 1 ? glow_limit : limit)) {
-                M_EmitBumpRange(
-                    batcher, bind, &lights, indices + range->start,
-                    range->start, range->count, &page, pass == 1);
+                DC_PROBE(
+                    pass == 1       ? DC_PROBE_B_SHINE
+                        : any_passing ? DC_PROBE_B_SHADEU
+                                      : DC_PROBE_B_SHADEK,
+                    M_EmitBumpRange(
+                        batcher, bind, &lights, indices + range->start,
+                        range->start, range->count, &page, pass == 1));
             }
         }
     }

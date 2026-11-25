@@ -54,6 +54,7 @@ typedef enum {
 #define DC_REPLAY_SEGMENTS 4
 
 void DC_Replay_SetMode(DC_REPLAY_MODE mode);
+DC_REPLAY_MODE DC_Replay_GetMode(void);
 bool DC_Replay_GameDraw(void);
 void DC_Replay_GameDrawDone(void);
 // The render thread stopped: no tick before to blend with.

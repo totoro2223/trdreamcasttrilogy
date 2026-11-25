@@ -1,4 +1,5 @@
 #include "dc_ragdoll.h"
+#include "dc_mode.h"
 
 #include <trx/core/math/trig.h>
 #include <trx/game/anims/common.h>
@@ -806,6 +807,10 @@ void DC_Ragdoll_Reset(void)
 void DC_Ragdoll_Start(
     const ITEM *const item, const XYZ_32 *const start, const XYZ_32 *const hit)
 {
+    // Off unless a test disc turns it on (TRX_DC_ASMOFF3 bit 2).
+    if ((g_DC_AsmOff3 & 2) == 0) {
+        return;
+    }
     const M_TYPE *const t = m_Ready ? M_GetType(item->object_id) : nullptr;
     if (t == nullptr || Room_Get(item->room_num)->flags.underwater) {
         return;

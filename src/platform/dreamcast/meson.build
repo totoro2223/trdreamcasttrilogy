@@ -87,6 +87,7 @@ dc_sources = files(
   'loading.c',
   'posix_compat.c',
   'render/batcher.c',
+  'render/bump_tune.c',
   'render/loading_font.c',
   'render/compositor.c',
   'render/debug_boxes.c',

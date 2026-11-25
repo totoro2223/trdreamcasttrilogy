@@ -336,6 +336,7 @@ static int M_RunGame(int argc, char *argv[])
     // A test disc that leaves assembly routines out (make_disc.sh's
     // TRX_DC_ASMOFF).
     g_DC_AsmOff = 0;
+    g_DC_AsmOff3 = 0;
     // dc_turn, dc_sphere_touch and dc_bounds_collide stay in C: on a real console
     // the box collision in assembly killed Lara's first frame (build 1327).
     // The rigs (2097152) and what rides on them, the bone fuse (8388608) and
@@ -349,12 +350,16 @@ static int M_RunGame(int argc, char *argv[])
     if (asm_off != nullptr) {
         unsigned mask = 0;
         unsigned mask2 = 0;
-        const int got = fscanf(asm_off, "%u %u", &mask, &mask2);
+        unsigned mask3 = 0;
+        const int got = fscanf(asm_off, "%u %u %u", &mask, &mask2, &mask3);
         if (got >= 1) {
             g_DC_AsmOff = mask;
         }
         if (got >= 2) {
             g_DC_AsmOff2 = mask2;
+        }
+        if (got >= 3) {
+            g_DC_AsmOff3 = mask3;
         }
         fclose(asm_off);
     }

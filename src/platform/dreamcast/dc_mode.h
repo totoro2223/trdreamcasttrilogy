@@ -43,6 +43,10 @@ extern int32_t g_DC_TestSnow;
 // coloured fog, 4 sight rays, 8 weather update, 16 weather draw, 32 effects.
 extern uint32_t g_DC_AsmOff;
 extern uint32_t g_DC_AsmOff2;
+// A third mask (make_disc.sh's TRX_DC_ASMOFF3): 1 = the relief kept from the
+// first frame of a tick is not used by the frames after it; 2 = the enemies' ragdolls
+// are on (they are off by default).
+extern uint32_t g_DC_AsmOff3;
 // A test disc's fog start and end in blocks (make_disc.sh TRX_DC_FOG), -1: the fixed ones.
 extern int32_t g_DC_TestFogStart;
 extern int32_t g_DC_TestFogEnd;

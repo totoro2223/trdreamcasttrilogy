@@ -302,6 +302,13 @@ void DC_Replay_SetMode(const DC_REPLAY_MODE mode)
     m_Replay.mode = mode;
 }
 
+DC_REPLAY_MODE DC_Replay_GetMode(void)
+{
+    return m_Replay.mode;
+}
+
+void DC_Batcher_BumpNewTick(void);
+
 bool DC_Replay_GameDraw(void)
 {
     M_PRIV *const p = &m_Priv;
@@ -313,6 +320,7 @@ bool DC_Replay_GameDraw(void)
         m_Replay.valid = true;
         m_Replay.segs = 0;
         DC_Batcher_BeginLerp();
+        DC_Batcher_BumpNewTick();
         return false;
     }
     if (m_Replay.mode != DC_REPLAY_PLAY || !m_Replay.valid) {

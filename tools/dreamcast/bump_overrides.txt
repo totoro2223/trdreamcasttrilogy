@@ -1,0 +1,10 @@
+# Zones of the relief to flatten or tune (texvq -o, made into the disc by
+# make_disc.sh). Page pixels (0 to 255), by level (its file name without the
+# extension, in lower case) and the page's number in that level.
+#
+#   flat  <level> <page> x0 y0 x1 y1           lies flat (a painted sign, a face)
+#   scale <level> <page> x0 y0 x1 y1 <factor>  the zone's relief times factor;
+#                                              negative turns it over
+#
+# Example (not active): the lettering on a ship's hull
+#   flat level16 3 96 64 160 80

@@ -158,6 +158,9 @@ static struct {
 static struct {
     pvr_ptr_t ptr[M_MAX_TEXTURE_PAGES];
     bool failed[M_MAX_TEXTURE_PAGES];
+    // The side of each relief: 256 from the disc ("TBP2"), 128 as the game
+    // makes it (and the old disc's).
+    int16_t size[M_MAX_TEXTURE_PAGES];
     // Pages made so far: making one stalls the frame it happens in.
     uint32_t made;
 } m_Bump = {};
@@ -1638,10 +1641,13 @@ static void M_LoadDiscBumps(void)
     uint32_t head[2];
     uint32_t *index = nullptr;
     uint16_t *data = nullptr;
-    bool ok = fread(head, 4, 2, fp) == 2 && memcmp(head, "TBP1", 4) == 0;
+    bool ok = fread(head, 4, 2, fp) == 2
+        && (memcmp(head, "TBP1", 4) == 0 || memcmp(head, "TBP2", 4) == 0);
+    const int32_t disc_size = ok && memcmp(head, "TBP2", 4) == 0 ? 256 : 128;
+    const size_t disc_bytes = (size_t)disc_size * disc_size * sizeof(uint16_t);
     if (ok) {
         index = malloc(head[1] * 8);
-        data = memalign(32, M_BUMP_BYTES);
+        data = memalign(32, disc_bytes);
         ok = index != nullptr && data != nullptr
             && fread(index, 8, head[1], fp) == head[1];
     }
@@ -1657,23 +1663,24 @@ static void M_LoadDiscBumps(void)
         }
         // Room kept for what the level still makes in play (half pages,
         // shadows, the screen capture).
-        if (pvr_mem_available() < M_BUMP_DISC_RESERVE + M_BUMP_BYTES) {
+        if (pvr_mem_available() < M_BUMP_DISC_RESERVE + disc_bytes) {
             LOG_WARNING("No video memory for more of the disc's reliefs");
             break;
         }
-        const long at = 8 + head[1] * 8 + (long)pos * M_BUMP_BYTES;
-        const pvr_ptr_t ptr = pvr_mem_malloc(M_BUMP_BYTES);
+        const long at = 8 + head[1] * 8 + (long)pos * (long)disc_bytes;
+        const pvr_ptr_t ptr = pvr_mem_malloc(disc_bytes);
         if (ptr == nullptr
             || (at != at_now && fseek(fp, at, SEEK_SET) != 0)
-            || fread(data, 1, M_BUMP_BYTES, fp) != M_BUMP_BYTES) {
+            || fread(data, 1, disc_bytes, fp) != disc_bytes) {
             if (ptr != nullptr) {
                 pvr_mem_free(ptr);
             }
             break;
         }
-        at_now = at + M_BUMP_BYTES;
-        M_WriteTexels(ptr, data, M_BUMP_BYTES / 2);
+        at_now = at + (long)disc_bytes;
+        M_WriteTexels(ptr, data, disc_bytes / 2);
         m_Bump.ptr[page] = ptr;
+        m_Bump.size[page] = (int16_t)disc_size;
         loaded++;
     }
     free(index);
@@ -2269,12 +2276,23 @@ static pvr_ptr_t M_GetBumpPage(const int32_t page)
         }
     }
     DC_Bump_Stretch(height, lo, hi);
+    uint8_t *const scratch = malloc(DC_BUMP_DETAIL_SCRATCH);
+    if (scratch != nullptr) {
+        DC_Bump_Detail(height, owner, scratch);
+        free(scratch);
+    }
+    float *const lean = malloc(size * size * 2 * sizeof(float));
+    if (lean != nullptr) {
+        DC_Bump_Slopes(height, owner, lean);
+    }
     for (int32_t y = 0; y < size; y++) {
         for (int32_t x = 0; x < size; x++) {
             uint16_t texel = DC_BUMP_FLAT;
-            float nx;
-            float ny;
-            if (DC_Bump_Slope(height, owner, x, y, &nx, &ny)) {
+            float nx = 0.0f;
+            float ny = 0.0f;
+            if (lean != nullptr && height[y * size + x] != 0) {
+                nx = lean[2 * (y * size + x)];
+                ny = lean[2 * (y * size + x) + 1];
                 texel = DC_Bump_Encode(nx, ny);
 #if defined(DC_EMIT_VERIFY)
                 {
@@ -2328,9 +2346,11 @@ static pvr_ptr_t M_GetBumpPage(const int32_t page)
             ((volatile uint16_t *)bump)[M_Twiddle(x, y)] = texel;
         }
     }
+    free(lean);
     free(height);
     free(owner);
     m_Bump.ptr[page] = bump;
+    m_Bump.size[page] = DC_BUMP_SIZE;
     m_HeaderGen++;
     m_Bump.failed[page] = false;
     m_Bump.made++;
@@ -2457,7 +2477,7 @@ static void M_CompileHeader(pvr_poly_hdr_t *const hdr)
         if (bump != nullptr) {
             pvr_poly_cxt_txr(
                 &cxt, list, PVR_TXRFMT_BUMP | PVR_TXRFMT_TWIDDLED,
-                DC_BUMP_SIZE, DC_BUMP_SIZE, bump,
+                m_Bump.size[m_Page], m_Bump.size[m_Page], bump,
                 m_Bilinear ? PVR_FILTER_BILINEAR : PVR_FILTER_NEAREST);
             // The texture as it is: KOS's decal keeps the vertex alpha.
             cxt.txr.env = PVR_TXRENV_REPLACE;
