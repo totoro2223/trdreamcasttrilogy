@@ -479,22 +479,26 @@ _Static_assert(
 
 // Cel shading, as Jet Set Radio's: the meshes lit by the object light (Lara,
 // the enemies) keep their light as it is, and their side turned from it is
-// drawn again over them darker, cut with a hard edge. The PowerVR has no shaders;
-// the edge comes of the punch-through alpha test, which cuts each pixel where
-// the alpha the vertices hand on falls under half (DC_BLEND_PUNCH_SHADE).
+// drawn again over them darker, blended in from the edge (M_CEL_SOFT). The
+// vertices hand on half the alpha at the edge; the faces with no corner past
+// it are left out, and the rest go to the translucent list (M_FlushCel).
 // How much of its colour the shaded side keeps: as the shadows, the nearer
 // the light, the darker; from a light at the end of its reach to one up
 // close (and M_SOFT_NO_LIGHT_WEIGHT's worth with no light near).
-#define M_CEL_SHADE_FAR 0.8f
-#define M_CEL_SHADE_NEAR 0.45f
+#define M_CEL_SHADE_FAR 0.4f
+#define M_CEL_SHADE_NEAR 0.2f
 // TR1's, whose Lara and levels take the shade to 45 % dark at most.
-#define M_CEL_SHADE_NEAR_TR1 0.55f
+#define M_CEL_SHADE_NEAR_TR1 0.3f
 // Where the edge lies: the cosine to the light past which a vertex is in
 // shade (0 at right angles to it; above 0, the shade narrows).
 #define M_CEL_EDGE 0.0f
 // A face whose corners all lie under half the alpha is lit all over: the
 // alpha runs straight across it. (A colour under this has its alpha so.)
 #define M_CEL_CUT 0x80000000u
+// The shade is blended in (M_FlushCel): past the edge its alpha grows this
+// many times as fast, whole a seventh of the way into the shade (7); the
+// higher, the harder the edge.
+#define M_CEL_SOFT 7
 // The rooms' cel shading (a test, rendering.dc_room_cel): their vertices carry
 // no normal, so the cut is in their light as it comes: a vertex darker than
 // the edge (its brightness, 0 to 255) is in the shade, drawn as dark as Lara's
@@ -1702,6 +1706,36 @@ static void M_PrepareInstanceLight(
         const float *const v = ls->vector_view;
         M_LightDir(mv, v, ls->divider, out->l, 2);
         out->has_direction = true;
+    }
+}
+
+// Lara's light comes the way her shadow on the floor says: the game's
+// brightest light (M_CalculateLight) may be another of the room's than the
+// one her shadow is cast by, and her cel shading then turned from the wrong
+// side. The same strength, the shadow's light's direction (away from it, as
+// l is).
+static void M_LaraLightFromShadow(
+    const float mv[4][4], M_INSTANCE_LIGHT *const il)
+{
+    if (!m_Frame.lara_instance || !il->has_direction || !M_CelOn()
+        || !m_Soft.cell_active[0]) {
+        return;
+    }
+    const float *const a = m_Soft.axes_eye[0][0];
+    const float a_sq = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    const float l_sq = (il->l[0] * il->l[0] + il->l[1] * il->l[1] + il->l[2] * il->l[2]);
+    if (a_sq <= 0.0f || l_sq <= 0.0f) {
+        return;
+    }
+    float d[3];
+    M_LightDir(mv, a, 1.0f, d, 0);
+    const float d_sq = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (d_sq <= 0.0f) {
+        return;
+    }
+    const float k = sqrtf(l_sq / d_sq);
+    for (int32_t c = 0; c < 3; c++) {
+        il->l[c] = d[c] * k;
     }
 }
 
@@ -6458,6 +6492,7 @@ static bool M_TransformRig(
     }
     if (pose != nullptr) {
         M_PrepareInstanceLight(obj_inst, bind, mv, &il);
+        M_LaraLightFromShadow(mv, &il);
         if (il.tr3) {
             for (int32_t i = 0; i < il.tr3_count; i++) {
                 for (int32_t k = 0; k < 3; k++) {
@@ -6528,6 +6563,7 @@ static bool M_TransformRig(
         M_ModelView(&bones[b], bmv, &bscale);
         if (!flat || !lit) {
             M_PrepareInstanceLight(obj_inst, bind, bmv, &il);
+            M_LaraLightFromShadow(bmv, &il);
             if (flat) {
                 if (il.tr3) {
                     for (int32_t i = 0; i < il.tr3_count; i++) {
@@ -6735,6 +6771,7 @@ static bool M_TransformInstance(
         lmv = light_mv;
     }
     M_PrepareInstanceLight(inst, bind, lmv, &il);
+    M_LaraLightFromShadow(lmv, &il);
 
     // The PSX lights a mesh per face only within 0xc00 (TOMB3 0x8c2d8, flag
     // 0x100): farther it takes one flat light. Here: past that, an object
@@ -7285,13 +7322,22 @@ static void M_FlushCel(MESH_BATCHER *const batcher)
             i + 1 < num_runs ? runs[i + 1].start : batcher->cel_count;
         const int32_t count = end - run->start;
         DC_PVR_SetState(
-            DC_BLEND_PUNCH_SHADE,
+            DC_BLEND_ALPHA,
             run->page == M_NO_PAGE ? DC_PVR_NO_TEXTURE : run->page, true);
         pvr_vertex_t *const out = DC_PVR_ReservePoly(count);
         if (out == nullptr) {
             continue;
         }
-        memcpy(out, &batcher->cel_buf[run->start], count * sizeof(*out));
+        const pvr_vertex_t *const src = &batcher->cel_buf[run->start];
+        for (int32_t k = 0; k < count; k++) {
+            out[k] = src[k];
+            // Blended, not cut: the shade comes in from the edge (half the
+            // alpha, where the faces were kept from) to the whole of it,
+            // and the PowerVR runs it smooth across each face.
+            const int32_t a = ((int32_t)(src[k].argb >> 24) - 128) * M_CEL_SOFT;
+            out[k].argb = (src[k].argb & 0x00FFFFFFu)
+                | ((uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a) << 24);
+        }
         DC_PVR_CommitPoly(count);
     }
     Vector_Clear(batcher->cel_runs);

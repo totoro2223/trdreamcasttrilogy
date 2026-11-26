@@ -159,6 +159,7 @@ static void M_CalculateLight(const XYZ_32 pos, const int16_t room_num)
 
     M_CalculateBrightestLight(pos, room, &brightest_light);
     int32_t adder = brightest_light.shade;
+    const int32_t room_shade = adder;
     int32_t dynamic_adder = M_CalculateDynamicLight(pos, &brightest_light);
 
     adder = (adder + dynamic_adder) / 2;
@@ -188,6 +189,25 @@ static void M_CalculateLight(const XYZ_32 pos, const int16_t room_num)
             pos.x - brightest_light.pos.x, pos.y - brightest_light.pos.y,
             pos.z - brightest_light.pos.z, angles);
         Output_RotateLight(angles[1], angles[0]);
+    }
+
+    // A passing light (a gun's flash) only turns and strengthens the light:
+    // the overall brightness stays the room's, so the side turned from the
+    // flash stays in shade instead of the whole body lighting up.
+    if (dynamic_adder > 0) {
+        int32_t room_adder = room_shade / 2;
+        if (g_TRVersion == 1 && room->num_lights > 0) {
+            room_adder += (SHADE_MAX - room->ambient) / 2;
+        }
+        global_adder = room_adder == 0 ? room->ambient
+            : g_TRVersion == 1         ? SHADE_MAX - room_adder
+                                       : room->ambient - room_adder;
+        // The turn by the brightest light's own strength: TR1's divider
+        // (brightest - adder) goes negative with a flash up close, which
+        // turned the light round and lit the back. Nearer, stronger: the
+        // side turned from it goes darker.
+        global_divider = (1 << W2V_SHIFT) * SHADE_NEUTRAL
+            / MAX(brightest_light.shade, 1);
     }
 
     CLAMPG(global_adder, SHADE_MAX);

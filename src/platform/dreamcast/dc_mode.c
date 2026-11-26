@@ -15,7 +15,7 @@ static const DC_MODE_PARAMS m_Modes[DC_MODE_NUMBER_OF] = {
     // than it kept: Lara, drawn last, lost her head and guns there.
     [DC_MODE_GRAPHICS] = {
         .shadow_lights = 2,
-        .self_shadow = true,
+        .self_shadow = false, // no longer used: Lara takes no soft shadow on herself
         .cel_shading = true,
         .bump_mapping = true,
         .fps = DC_FPS_30,
