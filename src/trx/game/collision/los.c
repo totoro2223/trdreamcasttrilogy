@@ -1,5 +1,11 @@
 #include <trx/game/collision/los.h>
 
+#if defined(__DREAMCAST__)
+    #include <platform/dreamcast/dc_probe.h>
+#else
+    #define DC_PROBE(i, stmt) stmt
+#endif
+
 #include <trx/core/utils.h>
 #include <trx/game/items.h>
 #include <trx/game/matrix.h>
@@ -560,7 +566,23 @@ int32_t LOS_CheckSmashable(
     return best_item_num;
 }
 
+static bool M_LOSCheck(
+    const GAME_VECTOR *start, GAME_VECTOR *target, bool use_slope_clipping);
+
 bool LOS_Check(
+    const GAME_VECTOR *const start, GAME_VECTOR *const target,
+    const bool use_slope_clipping)
+{
+    bool result;
+    DC_PROBE(
+        DC_PROBE_C_LOS, result = M_LOSCheck(start, target, use_slope_clipping));
+#if defined(__DREAMCAST__)
+    g_DC_ProbeUs[DC_PROBE_C_LOSN]++; // TEMP
+#endif
+    return result;
+}
+
+static bool M_LOSCheck(
     const GAME_VECTOR *const start, GAME_VECTOR *const target,
     const bool use_slope_clipping)
 {

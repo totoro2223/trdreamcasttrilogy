@@ -366,7 +366,70 @@ bool Box_IsJumpAhead(const LOT_INFO *const lot, const int16_t box_num)
     return M_IsOverlapTypeAhead(lot, box_num, BOX_OVERLAP_JUMP);
 }
 
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_target_box): the layout of its block.
+typedef struct {
+    LOT_INFO *lot;
+    int32_t box_num;
+    const BOX_INFO *boxes;
+    int32_t count;
+    int32_t tr;
+} M_TBOX;
+_Static_assert(sizeof(BOX_INFO) == 24, "dc_target_box");
+_Static_assert(offsetof(BOX_INFO, height) == 16, "dc_target_box");
+_Static_assert(offsetof(LOT_INFO, target) == 36, "dc_target_box");
+extern void dc_target_box(const M_TBOX *b);
+extern uint32_t g_DC_AsmOff3;
+static void M_TargetBoxC(LOT_INFO *lot, int16_t box_num);
+
+void Box_TargetBox(LOT_INFO *const lot, const int16_t box_num)
+{
+    // TR1 to TR3 in assembly; ASMOFF3 bit 32768 turns it off.
+    if (g_TRVersion > 3 || (g_DC_AsmOff3 & 32768) != 0) {
+        M_TargetBoxC(lot, box_num);
+        return;
+    }
+    const M_TBOX b = {
+        .lot = lot,
+        .box_num = box_num,
+        .boxes = m_Boxes,
+        .count = m_BoxCount,
+        .tr = g_TRVersion,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    LOT_INFO before;
+    LOT_INFO got;
+    memcpy(&before, lot, sizeof(LOT_INFO));
+    const uint32_t seed = *Random_GetControlState();
+    dc_target_box(&b);
+    memcpy(&got, lot, sizeof(LOT_INFO));
+    const uint32_t seed_got = *Random_GetControlState();
+    memcpy(lot, &before, sizeof(LOT_INFO));
+    *Random_GetControlState() = seed;
+    M_TargetBoxC(lot, box_num);
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((memcmp(&got, lot, sizeof(LOT_INFO)) != 0
+         || seed_got != *Random_GetControlState())
+        && bad++ < 6) {
+        LOG_WARNING(
+            "[tbox-verify] MISMATCH box %d target %d %d %d / %d %d %d",
+            (int)box_num, got.target.x, got.target.y, got.target.z,
+            lot->target.x, lot->target.y, lot->target.z);
+    }
+    if (runs++ == 0 || runs % 1000 == 0) {
+        LOG_WARNING(
+            "[tbox-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    #else
+    dc_target_box(&b);
+    #endif
+}
+
+static void M_TargetBoxC(LOT_INFO *const lot, int16_t box_num)
+#else
 void Box_TargetBox(LOT_INFO *const lot, int16_t box_num)
+#endif
 {
     box_num &= BOX_NUMBER_BITS;
     const BOX_INFO *const box = Box_GetBox(box_num);
@@ -646,6 +709,11 @@ static int32_t m_TickExpansions = M_TICK_EXPANSIONS;
 void Box_BeginTick(void)
 {
     m_TickExpansions = M_TICK_EXPANSIONS;
+}
+
+int32_t *Box_DC_TickExpansions(void)
+{
+    return &m_TickExpansions;
 }
 #endif
 

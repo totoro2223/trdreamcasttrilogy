@@ -9,4 +9,5 @@ int32_t Math_Sin(int32_t angle);
 // resolves 4096 steps per turn to 1 in 4096 instead of 1 in 16384. Movement in
 // TR3 is only exact with that table.
 void Math_SetCoarseTrig(bool enable);
+bool Math_IsCoarseTrig(void);
 int32_t Math_Atan(int32_t x, int32_t y);

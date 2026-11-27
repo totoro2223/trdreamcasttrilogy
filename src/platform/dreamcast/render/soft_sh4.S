@@ -789,3 +789,262 @@ cc_out:
     .long   0x3F000000
 .Lcc_size:
     .long   88
+
+! void dc_sil_faces(M_SILFACES *run);   batcher.c M_DrawSilhouettes' face loop
+!
+! The silhouette's faces from index j on, in each of the caster's cells: a
+! face turned one way (M_SilFront) goes out, a quad whose halves both do as
+! one strip of four, written straight into a run of the PowerVR's list
+! (DC_PVR_BeginRun), each corner as M_SilVertex and M_Fill make it. Stops
+! before a face that might not fit the room left, with j there.
+! M_SILFACES: 0 indices (uint16)  4 count  8 j (in, out)  12 the corners'
+!   x y (floats)  16 the cells' left edges  20 cells  24 top  28 z
+!   32 out  36 room  40 bytes (out)  44 polygons (out)  48 x scale  52 y scale
+! r8 run  r9 indices + j  r10 out  r11 bytes left  r12 polygons  r13 j
+! r14 count; fr8 top  fr9 z  fr10 x scale  fr11 y scale.
+
+! The corner of index \reg in the cell at fr12, with flags r7, to @r10+.
+    .macro SILV reg
+    mov     \reg,r0
+    shll2   r0
+    shll    r0                      ! 8 i
+    mov.l   @(12,r8),r1
+    add     r0,r1
+    fmov.s  @r1+,fr0
+    fmov.s  @r1,fr1
+    fadd    fr12,fr0
+    fmul    fr10,fr0                ! x
+    fadd    fr8,fr1
+    fmul    fr11,fr1                ! y
+    mov.l   r7,@r10
+    add     #4,r10
+    fmov.s  fr0,@r10
+    add     #4,r10
+    fmov.s  fr1,@r10
+    add     #4,r10
+    fmov.s  fr9,@r10                ! z
+    add     #4,r10
+    mov     #0,r0
+    mov.l   r0,@r10                 ! u
+    add     #4,r10
+    mov.l   r0,@r10                 ! v
+    add     #4,r10
+    mov.l   .Lsf_black,r1
+    mov.l   r1,@r10                 ! argb
+    add     #4,r10
+    mov.l   r0,@r10                 ! oargb
+    add     #4,r10
+    .endm
+
+! T: the face of corners \a \b \c turns the silhouette's way (M_SilFront).
+    .macro FRONT a, b, c
+    mov     \a,r0
+    shll2   r0
+    shll    r0
+    mov.l   @(12,r8),r1
+    add     r1,r0
+    fmov.s  @r0+,fr0                ! a
+    fmov.s  @r0,fr1
+    mov     \b,r0
+    shll2   r0
+    shll    r0
+    add     r1,r0
+    fmov.s  @r0+,fr2                ! b
+    fmov.s  @r0,fr3
+    mov     \c,r0
+    shll2   r0
+    shll    r0
+    add     r1,r0
+    fmov.s  @r0+,fr4                ! e
+    fmov.s  @r0,fr5
+    fsub    fr0,fr2
+    fsub    fr1,fr3
+    fsub    fr0,fr4
+    fsub    fr1,fr5
+    fmul    fr5,fr2                 ! (b-a).x (e-a).y
+    fmul    fr3,fr4                 ! (e-a).x (b-a).y
+    fsub    fr4,fr2
+    fldi0   fr0
+    fcmp/gt fr2,fr0                 ! below zero
+    .endm
+
+    .global _dc_sil_faces
+    .align 2
+_dc_sil_faces:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    fmov.s  fr12,@-r15
+    add     #-24,r15                ! the face's six corners
+    mov     r4,r8
+    mov.l   @(8,r8),r13             ! j
+    mov.l   @(4,r8),r14             ! count
+    mov.l   @r8,r9
+    mov     r13,r0
+    add     r0,r0
+    add     r0,r9                   ! indices + j
+    mov.l   @(32,r8),r10
+    mov.l   @(36,r8),r11
+    mov     #0,r12
+    mov     r8,r1
+    add     #24,r1
+    fmov.s  @r1+,fr8                ! top
+    fmov.s  @r1+,fr9                ! z
+    add     #16,r1
+    fmov.s  @r1+,fr10               ! x scale
+    fmov.s  @r1,fr11                ! y scale
+sfc_face:
+    mov     r13,r0
+    add     #2,r0
+    cmp/ge  r14,r0                  ! j + 2 < count
+    bf      1f
+    bra     sfc_done
+    nop
+1:  mov.l   @(20,r8),r1             ! room for the face in every cell
+    shll8   r1
+    shlr    r1                      ! 128 cells
+    cmp/hs  r1,r11
+    bt      2f
+    bra     sfc_done
+    nop
+2:  mov.w   @r9,r0
+    extu.w  r0,r0
+    mov.l   r0,@r15                 ! t0
+    mov.w   @(2,r9),r0
+    extu.w  r0,r0
+    mov.l   r0,@(4,r15)             ! t1
+    mov.w   @(4,r9),r0
+    extu.w  r0,r0
+    mov.l   r0,@(8,r15)             ! t2
+    mov     #0,r6                   ! a quad
+    mov     r13,r0
+    add     #5,r0
+    cmp/ge  r14,r0
+    bt      3f
+    mov.w   @(6,r9),r0
+    extu.w  r0,r0
+    mov.l   r0,@(12,r15)            ! t3
+    mov.w   @(8,r9),r0
+    extu.w  r0,r0
+    mov.l   r0,@(16,r15)            ! t4
+    mov.w   @(10,r9),r0
+    extu.w  r0,r0
+    mov.l   r0,@(20,r15)            ! t5
+    mov.l   @(12,r15),r1
+    mov.l   @(8,r15),r2
+    cmp/eq  r1,r2
+    bf      3f
+    mov.l   @(16,r15),r1
+    mov.l   @(4,r15),r2
+    cmp/eq  r1,r2
+    bf      3f
+    mov     #1,r6
+3:  mov.l   @r15,r2
+    mov.l   @(4,r15),r3
+    mov.l   @(8,r15),r4
+    FRONT   r2, r3, r4
+    movt    r4                      ! front0
+    mov     #0,r5                   ! front1
+    tst     r6,r6
+    bt      4f
+    mov.l   @(12,r15),r1
+    mov.l   @(16,r15),r2
+    mov.l   @(20,r15),r3
+    FRONT   r1, r2, r3
+    movt    r5
+4:  mov     #0,r3                   ! the cell
+sfc_cell:
+    mov.l   @(20,r8),r0
+    cmp/ge  r0,r3
+    bt      sfc_next
+    mov.l   @(16,r8),r1
+    mov     r3,r0
+    shll2   r0
+    add     r0,r1
+    fmov.s  @r1,fr12                ! the cell's left edge
+    mov     r4,r0
+    and     r5,r0
+    tst     r0,r0
+    bt      5f
+    mov.l   .Lsf_vtx,r7             ! both halves: a strip of four
+    mov.l   @r15,r1
+    SILV    r1
+    mov.l   @(4,r15),r1
+    SILV    r1
+    mov.l   @(8,r15),r1
+    SILV    r1
+    mov.l   .Lsf_eol,r7
+    mov.l   @(20,r15),r1
+    SILV    r1
+    mov.l   .Lsf_128,r0
+    sub     r0,r11
+    bra     sfc_celldone
+    add     #1,r12
+5:  tst     r4,r4
+    bt      6f
+    mov.l   .Lsf_vtx,r7
+    mov.l   @r15,r1
+    SILV    r1
+    mov.l   @(4,r15),r1
+    SILV    r1
+    mov.l   .Lsf_eol,r7
+    mov.l   @(8,r15),r1
+    SILV    r1
+    mov     #96,r0
+    sub     r0,r11
+    add     #1,r12
+6:  tst     r5,r5
+    bt      sfc_celldone
+    mov.l   .Lsf_vtx,r7
+    mov.l   @(12,r15),r1
+    SILV    r1
+    mov.l   @(16,r15),r1
+    SILV    r1
+    mov.l   .Lsf_eol,r7
+    mov.l   @(20,r15),r1
+    SILV    r1
+    mov     #96,r0
+    sub     r0,r11
+    add     #1,r12
+sfc_celldone:
+    bra     sfc_cell
+    add     #1,r3
+sfc_next:
+    tst     r6,r6
+    bt      7f
+    add     #3,r13
+    add     #6,r9
+7:  add     #3,r13
+    bra     sfc_face
+    add     #6,r9
+sfc_done:
+    mov.l   r13,@(8,r8)
+    mov.l   @(32,r8),r1
+    mov     r10,r0
+    sub     r1,r0
+    mov.l   r0,@(40,r8)             ! bytes
+    mov.l   r12,@(44,r8)            ! polygons
+    add     #24,r15
+    fmov.s  @r15+,fr12
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lsf_black:
+    .long   0xFF000000
+.Lsf_vtx:
+    .long   0xE0000000
+.Lsf_eol:
+    .long   0xF0000000
+.Lsf_128:
+    .long   128

@@ -262,6 +262,7 @@ static const char *const m_ProbeNames[DC_PROBE_COUNT] = {
     "ctest", "chide", "croom", "qtest", "qhide", "otest", "ohide", "otime", "ectl", "ectln", "edraw", "edrawn",
     "ownf", "owns", "groom", "gobj", "gfogc", "genvc", "gother", "iwalk", "imesh", "eclipc", "ebackc", "dpre", "dpost", "dtail", "sefr", "sfxm", "sspk", "srope", "sflare", "mphase", "mlua", "mbegin", "mevict", "ltarget", "lsmash", "lhairc",
     "bshadek", "bshadeu", "bshine", "bflush", "bfill", "breset", "bnobud", "bpass", "brooms", "bpnear", "bgrids", "bgridg",
+    "naiinfo", "nmood", "nanim", "closu", "closn",
 };
 
 const char *DC_ProbeName(const int32_t i)

@@ -544,10 +544,9 @@ static void M_InterpolateLinear(
     CLAMP(frac, 0, rate);
     const uint32_t inv_rate = 0xFFFFFFFFu / (uint32_t)rate;
 
-    // In assembly (game_sh4.S, dc_blend12) where the step is small; ASMOFF
-    // bit 536870912 turns it off.
-    if ((g_DC_AsmOff & 536870912) == 0
-        && (frac < 32 || (rate == 2 && frac == 1))) {
+    // In assembly (game_sh4.S, dc_blend12) wherever each step times frac
+    // fits 32 bits; ASMOFF bit 536870912 turns it off.
+    if ((g_DC_AsmOff & 536870912) == 0) {
         static const int32_t *p;
         static int32_t params[3];
         params[0] = frac;
@@ -1190,14 +1189,87 @@ static void M_InterpolateArm(MATRIX *const m, const MATRIX *const mi)
 }
 #endif
 
+#if defined(__DREAMCAST__)
+extern uint32_t g_DC_AsmOff3;
+extern int dc_interp_float(
+    const MATRIX *m1, const MATRIX *m2, MATRIX *out, const float *t);
+#endif
+
 static void M_Interpolate(
     const MATRIX *const m1, const MATRIX *const m2, MATRIX *const result)
 {
 #if defined(__DREAMCAST__)
+    #if defined(DC_EMIT_VERIFY)
+    // The slerp in assembly against the C, whichever blend is chosen.
+    if ((g_DC_AsmOff3 & 4) == 0) {
+        float t = (m_IMRate != 0) ? (float)m_IMFrac / (float)m_IMRate : 0.0f;
+        CLAMP(t, 0.0f, 1.0f);
+        MATRIX ref;
+        MATRIX got;
+        const bool ok_c = M_InterpolateFloat(m1, m2, &ref);
+        const bool ok_a = dc_interp_float(m1, m2, &got, &t) != 0;
+        static uint32_t runs;
+        static uint32_t exact;
+        static uint32_t bad;
+        static int64_t worst;
+        if (ok_c != ok_a) {
+            bad++;
+        } else if (ok_c) {
+            const int64_t *const r = &ref._00;
+            const int64_t *const g = &got._00;
+            bool same = true;
+            for (int32_t i = 0; i < 12; i++) {
+                const int64_t d = r[i] > g[i] ? r[i] - g[i] : g[i] - r[i];
+                same &= d == 0;
+                if (d > worst) {
+                    worst = d;
+                }
+                if (d > 2) {
+                    bad++;
+                    if (bad < 6) {
+                        float e1[3][3];
+                        float e2[3][3];
+                        M_Float3x3FromMatrix(m1, e1);
+                        M_Float3x3FromMatrix(m2, e2);
+                        M_QUAT_F q1;
+                        M_QUAT_F q2;
+                        M_Float3x3ToQuat(e1, &q1);
+                        M_Float3x3ToQuat(e2, &q2);
+                        const float cosom = q1.x * q2.x + q1.y * q2.y
+                            + q1.z * q2.z + q1.w * q2.w;
+                        LOG_WARNING(
+                            "[pose-verify] entry %d c %lld asm %lld tr1 %d "
+                            "tr2 %d cos*1000 %d t*1000 %d",
+                            (int)i, (long long)r[i], (long long)g[i],
+                            (int)(1000 * (e1[0][0] + e1[1][1] + e1[2][2])),
+                            (int)(1000 * (e2[0][0] + e2[1][1] + e2[2][2])),
+                            (int)(1000 * cosom), (int)(1000 * t));
+                    }
+                    break;
+                }
+            }
+            exact += same;
+        }
+        if (runs++ == 0 || runs % 5000 == 0) {
+            LOG_WARNING(
+                "[pose-verify] %u runs, %u exact, %u bad, worst %lld",
+                (unsigned)runs, (unsigned)exact, (unsigned)bad,
+                (long long)worst);
+        }
+    }
+    #endif
     // The original simulation also blends poses as the originals did.
     if (g_Config.rendering.dc_linear_pose || LOT_IsOriginalSim()) {
         M_InterpolateLinear(m1, m2, result);
         return;
+    }
+    // In assembly (pose_sh4.S, dc_interp_float); ASMOFF3 bit 4 turns it off.
+    if ((g_DC_AsmOff3 & 4) == 0) {
+        float t = (m_IMRate != 0) ? (float)m_IMFrac / (float)m_IMRate : 0.0f;
+        CLAMP(t, 0.0f, 1.0f);
+        if (dc_interp_float(m1, m2, result, &t)) {
+            return;
+        }
     }
     if (M_InterpolateFloat(m1, m2, result)) {
         return;
@@ -1759,6 +1831,136 @@ void Matrix_Rot16_ID(const XYZ_16 rotation_1, const XYZ_16 rotation_2)
     M_RotYXZ_N(a, n, rotation_1);
     M_RotYXZ_N(b, n, rotation_2);
 }
+
+#if defined(__DREAMCAST__)
+// In assembly (pose_sh4.S, dc_walk_joint): the layout of its block.
+typedef struct {
+    MATRIX **view;
+    MATRIX **world;
+    MATRIX **view_far;
+    MATRIX **world_far;
+    const MATRIX *view_last;
+    const MATRIX *world_last;
+    int32_t flags;
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    const XYZ_16 *rot;
+    const XYZ_16 *rot_far;
+    int32_t (*sin)(int32_t angle);
+} M_WALK_JOINT;
+_Static_assert(sizeof(M_WALK_JOINT) == 52, "dc_walk_joint's block");
+extern int32_t dc_sin(int32_t angle);
+extern int32_t dc_sin_coarse(int32_t angle);
+extern void dc_walk_joint(const M_WALK_JOINT *c);
+
+static void M_WalkJointC(
+    const bool pop, const bool push, const XYZ_32 pos, const XYZ_16 *const rot,
+    const XYZ_16 *const rot_far, const bool interpolated)
+{
+    if (pop) {
+        interpolated ? Matrix_Pop_I() : Matrix_Pop();
+    }
+    if (push) {
+        if (interpolated) {
+            Matrix_Push_I();
+        } else {
+            Matrix_Push();
+        }
+    }
+    if (interpolated) {
+        Matrix_TranslateRel32_I(pos);
+    } else {
+        Matrix_TranslateRel32(pos);
+    }
+    if (rot != nullptr) {
+        if (interpolated) {
+            Matrix_Rot16_ID(*rot, *rot_far);
+        } else {
+            Matrix_Rot16(*rot);
+        }
+    }
+}
+
+bool Matrix_DC_WalkJoint(
+    const bool pop, const bool push, const XYZ_32 pos, const XYZ_16 *const rot,
+    const XYZ_16 *const rot_far, const bool interpolated)
+{
+    // Only where the routines it calls are the ones the C would take: the
+    // world stack alone, the fine sine table, and the matrix routines in
+    // assembly (ASMOFF3 bit 8 turns it off).
+    // TR3's coarse table through its own routine, as Math_Sin takes it.
+    const bool coarse = Math_IsCoarseTrig();
+    if (!g_MatrixWorldOnly || (g_DC_AsmOff3 & 8) != 0
+        || (g_DC_AsmOff & (67108864u | 134217728u | 1073741824u)) != 0
+        || (g_DC_AsmOff2 & (coarse ? 8192 : 32)) != 0) {
+        return false;
+    }
+    const M_WALK_JOINT c = {
+        .view = &g_MatrixPtr,
+        .world = &g_WMatrixPtr,
+        .view_far = &m_IMMatrixPtr,
+        .world_far = &m_WIMMatrixPtr,
+        .view_last = &m_MatrixStack[MAX_MATRICES - 1],
+        .world_last = &m_WMatrixStack[MAX_MATRICES - 1],
+        .flags = (pop ? 1 : 0) | (push ? 2 : 0) | (interpolated ? 4 : 0)
+            | (rot != nullptr ? 8 : 0),
+        .x = pos.x,
+        .y = pos.y,
+        .z = pos.z,
+        .rot = rot,
+        .rot_far = rot_far,
+        .sin = coarse ? dc_sin_coarse : dc_sin,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    static MATRIX before[4][MAX_MATRICES];
+    static MATRIX after[4][MAX_MATRICES];
+    MATRIX *const ptrs_before[4] = {
+        g_MatrixPtr, g_WMatrixPtr, m_IMMatrixPtr, m_WIMMatrixPtr
+    };
+    memcpy(before[0], m_MatrixStack, sizeof(m_MatrixStack));
+    memcpy(before[1], m_WMatrixStack, sizeof(m_WMatrixStack));
+    memcpy(before[2], m_IMMatrixStack, sizeof(m_IMMatrixStack));
+    memcpy(before[3], m_WIMMatrixStack, sizeof(m_WIMMatrixStack));
+    dc_walk_joint(&c);
+    MATRIX *const ptrs_asm[4] = {
+        g_MatrixPtr, g_WMatrixPtr, m_IMMatrixPtr, m_WIMMatrixPtr
+    };
+    memcpy(after[0], m_MatrixStack, sizeof(m_MatrixStack));
+    memcpy(after[1], m_WMatrixStack, sizeof(m_WMatrixStack));
+    memcpy(after[2], m_IMMatrixStack, sizeof(m_IMMatrixStack));
+    memcpy(after[3], m_WIMMatrixStack, sizeof(m_WIMMatrixStack));
+    memcpy(m_MatrixStack, before[0], sizeof(m_MatrixStack));
+    memcpy(m_WMatrixStack, before[1], sizeof(m_WMatrixStack));
+    memcpy(m_IMMatrixStack, before[2], sizeof(m_IMMatrixStack));
+    memcpy(m_WIMMatrixStack, before[3], sizeof(m_WIMMatrixStack));
+    g_MatrixPtr = ptrs_before[0];
+    g_WMatrixPtr = ptrs_before[1];
+    m_IMMatrixPtr = ptrs_before[2];
+    m_WIMMatrixPtr = ptrs_before[3];
+    M_WalkJointC(pop, push, pos, rot, rot_far, interpolated);
+    static uint32_t runs;
+    static uint32_t bad;
+    const bool same = g_MatrixPtr == ptrs_asm[0] && g_WMatrixPtr == ptrs_asm[1]
+        && m_IMMatrixPtr == ptrs_asm[2] && m_WIMMatrixPtr == ptrs_asm[3]
+        && memcmp(after[0], m_MatrixStack, sizeof(m_MatrixStack)) == 0
+        && memcmp(after[1], m_WMatrixStack, sizeof(m_WMatrixStack)) == 0
+        && memcmp(after[2], m_IMMatrixStack, sizeof(m_IMMatrixStack)) == 0
+        && memcmp(after[3], m_WIMMatrixStack, sizeof(m_WIMMatrixStack)) == 0;
+    if (!same && bad++ < 4) {
+        LOG_WARNING(
+            "[walk-verify] MISMATCH flags %d", (int)c.flags);
+    }
+    if (runs++ == 0 || runs % 5000 == 0) {
+        LOG_WARNING(
+            "[walk-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    #else
+    dc_walk_joint(&c);
+    #endif
+    return true;
+}
+#endif
 
 void Matrix_LookAt(
     const int32_t source_x, const int32_t source_y, const int32_t source_z,

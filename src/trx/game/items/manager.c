@@ -789,6 +789,8 @@ void Item_Control(void)
 #if defined(__DREAMCAST__)
     Box_BeginTick();
     m_ControlTick++;
+    extern void DC_TestTour_Tick(void);
+    DC_TestTour_Tick();
 #endif
 
     int16_t item_num = Item_GetNextSimulated();

@@ -174,6 +174,11 @@ enum {
     DC_PROBE_B_PNEAR, // faces a passing light reaches (count)
     DC_PROBE_B_GRIDS, // faces drawn as a fine grid, the shade's (count)
     DC_PROBE_B_GRIDG, // faces drawn as a grid, the shine's (count)
+    DC_PROBE_N_AIINFO, // Creature_AIInfo (time)
+    DC_PROBE_N_MOOD, // Creature_Mood (time)
+    DC_PROBE_N_ANIM, // Creature_Animate (time)
+    DC_PROBE_C_LOS, // LOS_Check (time)
+    DC_PROBE_C_LOSN, // ... and how many (count)
     DC_PROBE_COUNT,
 };
 

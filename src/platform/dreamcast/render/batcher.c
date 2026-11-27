@@ -341,6 +341,8 @@ static int32_t m_DebugFrameRooms = 0;
 // Per chunk of the room just culled: 0 outside the view, 1 drawn, 2 hidden by
 // the walls.
 static uint8_t m_ChunkState[M_MAX_CHUNKS];
+// Each chunk's nearest depth, as M_CullChunks last found it.
+static float m_ChunkZNear[M_MAX_CHUNKS];
 
 static void M_DebugBox(
     const MATRIX *const w, const float lo[3], const float hi[3],
@@ -1331,24 +1333,34 @@ static void M_RoomSphere(
 #endif
 }
 
-static void M_PrepareRoomLights(
-    const MESH_INSTANCE *const inst, const M_BINDING *const bind,
-    M_INSTANCE_LIGHT *const out)
-{
-    out->has_room_lights = true;
-    M_WorldMatrix(&inst->wmatrix, out->world);
-
-    const DC_UNIFORM_LIGHTS *const lights = m_Frame.lights;
-    out->num_lights = 0;
-    out->flicker = 0.0f;
-    if (lights == nullptr) {
-        return;
-    }
-    // The instance's bounding sphere in the world: a light that does not
-    // reach it lights none of its vertices, and is left out.
+// In assembly (inst_sh4.S, dc_room_lights): the layout of its block.
+typedef struct {
+    const DC_UNIFORM_LIGHTS *lights;
     float center[3];
-    float inst_radius;
-    M_RoomSphere(out->world, bind->bounds, center, &inst_radius);
+    float radius;
+    M_POINT_LIGHT *point;
+    int32_t *num_point;
+    M_RGB_LIGHT *rgb;
+    int32_t *num_rgb;
+} M_ROOM_LIGHTS;
+_Static_assert(sizeof(M_ROOM_LIGHTS) == 36, "dc_room_lights' block");
+_Static_assert(sizeof(DC_UNIFORM_LIGHT) == 48, "dc_room_lights' light");
+_Static_assert(sizeof(M_POINT_LIGHT) == 24, "dc_room_lights' point light");
+_Static_assert(sizeof(M_RGB_LIGHT) == 32, "dc_room_lights' RGB light");
+extern void dc_room_lights(const M_ROOM_LIGHTS *c);
+
+// dc_room_lights calls this for a power M_Exp2 does not take whole.
+float DC_Batcher_Exp2(float e);
+float DC_Batcher_Exp2(const float e)
+{
+    return M_Exp2(e);
+}
+
+// The room's lights that reach the instance's sphere (centre, radius).
+static void M_RoomLightsC(
+    const DC_UNIFORM_LIGHTS *const lights, const float center[3],
+    const float inst_radius, M_INSTANCE_LIGHT *const out)
+{
     for (int32_t i = 0;
          i < lights->num_lights && out->num_lights < M_MAX_POINT_LIGHTS; i++) {
         const DC_UNIFORM_LIGHT *const light = &lights->lights[i];
@@ -1391,6 +1403,69 @@ static void M_PrepareRoomLights(
         pl->radius_sq = radius * radius;
         pl->max_shade = M_Exp2(light->shade);
         pl->inv_div = 1.0f / M_Exp2(2.0f * light->falloff - light->shade);
+    }
+}
+
+static void M_PrepareRoomLights(
+    const MESH_INSTANCE *const inst, const M_BINDING *const bind,
+    M_INSTANCE_LIGHT *const out)
+{
+    out->has_room_lights = true;
+    M_WorldMatrix(&inst->wmatrix, out->world);
+
+    const DC_UNIFORM_LIGHTS *const lights = m_Frame.lights;
+    out->num_lights = 0;
+    out->flicker = 0.0f;
+    if (lights == nullptr) {
+        return;
+    }
+    // The instance's bounding sphere in the world: a light that does not
+    // reach it lights none of its vertices, and is left out.
+    float center[3];
+    float inst_radius;
+    M_RoomSphere(out->world, bind->bounds, center, &inst_radius);
+    // In assembly (inst_sh4.S, dc_room_lights); ASMOFF3 bit 16 turns it off.
+    if ((g_DC_AsmOff3 & 16) != 0) {
+        M_RoomLightsC(lights, center, inst_radius, out);
+    } else {
+        const M_ROOM_LIGHTS c = {
+            .lights = lights,
+            .center = { center[0], center[1], center[2] },
+            .radius = inst_radius,
+            .point = out->lights,
+            .num_point = &out->num_lights,
+            .rgb = out->rgb,
+            .num_rgb = &out->num_rgb,
+        };
+#if defined(DC_EMIT_VERIFY)
+        static M_INSTANCE_LIGHT ref;
+        ref.num_lights = out->num_lights;
+        ref.num_rgb = out->num_rgb;
+        memcpy(ref.rgb, out->rgb, sizeof(ref.rgb));
+        M_RoomLightsC(lights, center, inst_radius, &ref);
+        dc_room_lights(&c);
+        static uint32_t runs;
+        static uint32_t bad;
+        if (ref.num_lights != out->num_lights || ref.num_rgb != out->num_rgb
+            || memcmp(ref.lights, out->lights,
+                      sizeof(M_POINT_LIGHT) * (size_t)out->num_lights) != 0
+            || memcmp(ref.rgb, out->rgb,
+                      sizeof(M_RGB_LIGHT) * (size_t)out->num_rgb) != 0) {
+            if (bad++ < 6) {
+                LOG_WARNING(
+                    "[roomlights-verify] MISMATCH n %d/%d rgb %d/%d",
+                    (int)ref.num_lights, (int)out->num_lights,
+                    (int)ref.num_rgb, (int)out->num_rgb);
+            }
+        }
+        if (runs++ == 0 || runs % 2000 == 0) {
+            LOG_WARNING(
+                "[roomlights-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+#else
+        dc_room_lights(&c);
+#endif
     }
     const int32_t index =
         M_FlickerIndex(lights->room_light_mode, m_Frame.time_in_game);
@@ -1472,10 +1547,96 @@ static void M_LightDir(
 #endif
 }
 
+// TR3's branch of M_ReadInstanceLight in assembly (inst_sh4.S,
+// dc_tr3_light); ASMOFF3 bit 16384 turns it off, as does M_LightDir's own.
+typedef struct {
+    const OUTPUT_LIGHT_INFO *info;
+    M_INSTANCE_LIGHT *out;
+    const float *mv;
+    int32_t object;
+} M_TR3_LIGHT;
+_Static_assert(offsetof(OUTPUT_LIGHT_INFO, tr3_ambient) == 20, "dc_tr3_light");
+_Static_assert(offsetof(OUTPUT_LIGHT_INFO, tr3_light_color) == 32, "dc_tr3_light");
+_Static_assert(offsetof(OUTPUT_LIGHT_INFO, tr3_light_dir_view) == 68, "dc_tr3_light");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, has_direction) == 16, "dc_tr3_light");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3_count) == 36, "dc_tr3_light");
+extern void dc_tr3_light(const M_TR3_LIGHT *b);
+
 static void M_ReadInstanceLight(
     const OUTPUT_LIGHT_INFO *const info, const M_BINDING *const bind,
     const float mv[4][4], M_INSTANCE_LIGHT *const out)
 {
+    if (out->tr3 && (g_DC_AsmOff3 & 16384) == 0 && (g_DC_AsmOff & 32768) == 0) {
+        const M_TR3_LIGHT b = {
+            .info = info,
+            .out = out,
+            .mv = &mv[0][0],
+            .object = bind->needs_object_light,
+        };
+#if defined(DC_EMIT_VERIFY)
+        M_INSTANCE_LIGHT ref = *out;
+        const bool tr3_off = true;
+        (void)tr3_off;
+        dc_tr3_light(&b);
+        // The C on the copy taken before.
+        {
+            M_INSTANCE_LIGHT *const o = &ref;
+            o->tr3_ambient[0] = info->tr3_ambient.r;
+            o->tr3_ambient[1] = info->tr3_ambient.g;
+            o->tr3_ambient[2] = info->tr3_ambient.b;
+            if (bind->needs_object_light) {
+                float best = 0.0f;
+                for (int32_t i = 0; i < 3; i++) {
+                    const RGB_F col = info->tr3_light_color[i];
+                    const float sum = col.r + col.g + col.b;
+                    if (sum <= 0.0f) {
+                        continue;
+                    }
+                    float v[3] = {
+                        (float)info->tr3_light_dir_view[i].x,
+                        (float)info->tr3_light_dir_view[i].y,
+                        (float)info->tr3_light_dir_view[i].z,
+                    };
+                    float *const d = o->tr3_dir[o->tr3_count];
+                    M_LightDir(mv, v, 1.0f / (float)(1 << 14), d, 1);
+                    o->tr3_color[o->tr3_count][0] = col.r;
+                    o->tr3_color[o->tr3_count][1] = col.g;
+                    o->tr3_color[o->tr3_count][2] = col.b;
+                    if (sum > best) {
+                        best = sum;
+                        for (int32_t c = 0; c < 3; c++) {
+                            o->l[c] = -d[c] * (float)(1 << 14);
+                        }
+                        o->has_direction = true;
+                    }
+                    o->tr3_count++;
+                }
+            }
+        }
+        static uint32_t runs;
+        static uint32_t bad;
+        runs++;
+        if ((ref.tr3_count != out->tr3_count
+             || ref.has_direction != out->has_direction
+             || memcmp(ref.tr3_dir, out->tr3_dir, sizeof(ref.tr3_dir)) != 0
+             || memcmp(ref.tr3_color, out->tr3_color, sizeof(ref.tr3_color))
+                 != 0
+             || memcmp(ref.l, out->l, sizeof(ref.l)) != 0)
+            && bad++ < 6) {
+            LOG_WARNING(
+                "[tr3light-verify] MISMATCH count %d/%d", (int)ref.tr3_count,
+                (int)out->tr3_count);
+        }
+        if (runs % 2000 == 0) {
+            LOG_WARNING(
+                "[tr3light-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+#else
+        dc_tr3_light(&b);
+#endif
+        return;
+    }
     if (out->tr3) {
         out->tr3_ambient[0] = info->tr3_ambient.r;
         out->tr3_ambient[1] = info->tr3_ambient.g;
@@ -3466,7 +3627,13 @@ struct M_GENRUN {
     int32_t hash_x;                     // 284
     int32_t hash_y;                     // 288
     int32_t hash_z;                     // 292
+    // The reflection's block, filled once for the instance (or null: the
+    // C's way, env_cb), and the arrays its vertices write to.
+    M_ENVRUN *envrun;                   // 296
+    float (*env_uv)[2];                 // 300
+    uint32_t *eargb;                    // 304
 };
+_Static_assert(offsetof(M_GENRUN, envrun) == 296, "xform_gen_sh4.S layout");
 _Static_assert(offsetof(M_GENRUN, caus_f) == 224, "light_sh4.S layout");
 _Static_assert(offsetof(M_GENRUN, hash_z) == 292, "light_sh4.S layout");
 _Static_assert(offsetof(M_GENRUN, tr3_double) == 264, "light_sh4.S layout");
@@ -3674,6 +3841,25 @@ static void M_XformGeneric(
         .hash_y = 19349663,
         .hash_z = 83492791,
     };
+    // The reflection's numbers that hold for the whole instance, once: the
+    // assembly fills in each vertex's and calls dc_env_vertex itself.
+    M_ENVRUN env_run;
+    if (batcher->env && (g_DC_AsmOff & 128) == 0) {
+        env_run = (M_ENVRUN) {
+            .m0 = { mv[0][0], mv[1][0], mv[2][0] },
+            .m1 = { mv[0][1], mv[1][1], mv[2][1] },
+            .m2 = { mv[0][2], mv[1][2], mv[2][2] },
+            .strength = M_ENV_STRENGTH,
+            .env_x = m_Frame.proj_x < 0.0f ? -1.0f : 1.0f,
+            .env_y = m_Frame.proj_y < 0.0f ? -1.0f : 1.0f,
+            .k05 = 0.5f,
+            .k2 = 2.0f,
+            .k255 = 255.0f,
+        };
+        run.envrun = &env_run;
+        run.env_uv = batcher->env_uv;
+        run.eargb = batcher->eargb;
+    }
 #if defined(DC_EMIT_VERIFY)
     M_VerifyLight(bind, inst, il);
     const int32_t n = bind->vertex_count;
@@ -3683,10 +3869,48 @@ static void M_XformGeneric(
     mat_load(&batcher->mv);
     dc_xform_generic(&run);
     memcpy(saved, batcher->xverts, sizeof(M_XVERT) * n);
+    // The reflections the assembly wrote straight, against the C's way.
+    static uint32_t *saved_e = nullptr;
+    static float (*saved_uv)[2] = nullptr;
+    static int32_t saved_cap = 0;
+    if (batcher->env && n > saved_cap) {
+        free(saved_e);
+        free(saved_uv);
+        saved_e = malloc(sizeof(uint32_t) * (size_t)n);
+        saved_uv = malloc(sizeof(float) * 2 * (size_t)n);
+        saved_cap = saved_e != nullptr && saved_uv != nullptr ? n : 0;
+    }
+    const bool check_env = batcher->env && n <= saved_cap;
+    if (check_env) {
+        memcpy(saved_e, batcher->eargb, sizeof(uint32_t) * (size_t)n);
+        memcpy(saved_uv, batcher->env_uv, sizeof(float) * 2 * (size_t)n);
+    }
     memcpy(saved_o, batcher->oargb, sizeof(uint32_t) * n);
     memcpy(saved_s, batcher->sargb, sizeof(uint32_t) * n);
     M_XformGenericC(
         batcher, bind, inst, il, c, mv, scale, cel_scale, black_fog);
+    if (check_env) {
+        static uint32_t env_runs;
+        static uint32_t env_bad;
+        for (int32_t i = 0; i < n; i++) {
+            env_runs++;
+            if (saved_e[i] != batcher->eargb[i]
+                || saved_uv[i][0] != batcher->env_uv[i][0]
+                || saved_uv[i][1] != batcher->env_uv[i][1]) {
+                if (env_bad++ < 6) {
+                    LOG_WARNING(
+                        "[envfast-verify] vertex %d argb %08x/%08x",
+                        (int)i, (unsigned)saved_e[i],
+                        (unsigned)batcher->eargb[i]);
+                }
+            }
+        }
+        if (env_runs % 4096 < (uint32_t)n) {
+            LOG_WARNING(
+                "[envfast-verify] %u vertices, %u different",
+                (unsigned)env_runs, (unsigned)env_bad);
+        }
+    }
     static uint32_t m_Runs;
     static uint32_t m_Bad;
     bool bad = false;
@@ -5035,6 +5259,7 @@ static int32_t M_CullChunks(
         const float radius = chunk->radius * scale;
         shows[k] = M_SphereShows(eye, radius, c);
         z_near[k] = eye[2] - radius;
+        m_ChunkZNear[k] = z_near[k];
         m_ChunkState[k] = shows[k] ? 1 : 0;
         if (shows[k] && sees) {
             g_DC_ProbeUs[DC_PROBE_C_TESTED]++; // TEMP
@@ -5222,6 +5447,31 @@ static void M_EmitChunk(
 // The native batches' buffer: the half of the data cache kept as RAM while
 // the native rooms are on (DC_Batcher_SetNative), else plain RAM.
 bool g_DC_NativeRooms = false;
+
+// The rooms' baked batches in every mode, not only the native one: the same
+// corners (M_NatCheck), out of plain RAM where the data cache stays whole.
+// A room its relief reaches keeps the corners' way, which the relief reads.
+// TRX_DC_ASMOFF3 bit 64 leaves them to the native mode.
+static bool M_NatRoomsOn(void)
+{
+    return g_DC_NativeRooms || (g_DC_AsmOff3 & 64) == 0;
+}
+
+// The objects' kept colours (M_ObjKey) in every mode; ASMOFF3 bit 128 leaves
+// them to the native mode.
+static bool M_ObjCacheOn(void)
+{
+    return g_DC_NativeRooms || (g_DC_AsmOff3 & 128) == 0;
+}
+
+// The chunks of the room being drawn that a soft shadow falls on
+// (M_SoftChunksHit): they keep the corners' way, which the shadow reads.
+static bool m_SoftHit[M_MAX_CHUNKS];
+// The farthest the relief reaches in front (M_EmitBump: the shade's and the
+// shine's, a passing light's three times as far).
+static float M_ReliefReach(void);
+static bool M_SoftChunksHit(
+    const MESH_BATCHER *batcher, const M_BINDING *bind, bool *hit);
 static bool m_NatOcram = false;
 static uint32_t m_NatBatches = 0;
 static uint32_t m_NatScattered = 0;
@@ -5306,10 +5556,14 @@ void DC_Batcher_SetNative(bool on)
                  on ? "on" : "off");
     }
 #if defined(TRX_DC_WATCHDOG)
-    if (on && m_NatCheckFrames > 0 && --m_NatCheckFrames == 0) {
+    if ((M_NatRoomsOn() || M_ObjCacheOn()) && m_NatCheckFrames > 0
+        && --m_NatCheckFrames == 0) {
         LOG_INFO(
             "[native-check] %u corners checked, %u mismatched",
             (unsigned)m_NatCheckN, (unsigned)m_NatCheckBad);
+        LOG_INFO(
+            "[obj-check] %u corners checked, %u mismatched",
+            (unsigned)m_ObjCheckN, (unsigned)m_ObjCheckBad);
     }
 #endif
     // Every ten seconds, how many batches went out the native way.
@@ -5641,7 +5895,85 @@ static void M_NatWaterPlaces(
 // A baked batch's water vertices coloured for this frame, as the room's
 // assembly colours them: their own colour plus their lane's value, each
 // byte held to 0-255, then the curve and the tint.
+typedef struct {
+    const OUTPUT_MESH_VERTEX *vertices;
+    const uint8_t *places;
+    M_XVERT *buf;
+    int32_t count;
+    const int32_t *table;
+    uint32_t ka;
+    uint32_t kr;
+    uint32_t kg;
+    uint32_t kb;
+} M_NAT_WATER;
+_Static_assert(sizeof(M_NAT_WATER) == 36, "dc_nat_water's block");
+_Static_assert(sizeof(OUTPUT_MESH_VERTEX) == 28, "dc_nat_water");
+_Static_assert(offsetof(OUTPUT_MESH_VERTEX, color) == 4, "dc_nat_water");
+extern void dc_nat_water(const M_NAT_WATER *w);
+
+static void M_NatWaterC(
+    const M_BINDING *bind, const MESH_INSTANCE *inst,
+    const M_INSTANCE_LIGHT *il, const M_NAT_BATCH *nb, M_XVERT *buf);
+
+// In assembly (inst_sh4.S, dc_nat_water); ASMOFF3 bit 8192 turns it off.
 static void M_NatWater(
+    const M_BINDING *const bind, const MESH_INSTANCE *const inst,
+    const M_INSTANCE_LIGHT *const il, const M_NAT_BATCH *const nb,
+    M_XVERT *const buf)
+{
+    if ((g_DC_AsmOff3 & 8192) != 0) {
+        M_NatWaterC(bind, inst, il, nb, buf);
+        return;
+    }
+    const uint32_t k = (uint32_t)(256.0f * il->tr3_double);
+    const M_NAT_WATER w = {
+        .vertices =
+            (const OUTPUT_MESH_VERTEX *)Vector_GetData(bind->mesh->vertices)
+            + nb->vstart,
+        .places = &bind->nat_widx[nb->vstart],
+        .buf = buf,
+        .count = nb->vcount,
+        .table = m_WaterTab,
+        .ka = M_TintK(inst->tint.a),
+        .kr = k * M_TintK(inst->tint.r) >> 8,
+        .kg = k * M_TintK(inst->tint.g) >> 8,
+        .kb = k * M_TintK(inst->tint.b) >> 8,
+    };
+#if defined(DC_EMIT_VERIFY)
+    static uint32_t *ref = nullptr;
+    static int32_t ref_cap = 0;
+    if (nb->vcount > ref_cap) {
+        free(ref);
+        ref = malloc(sizeof(uint32_t) * (size_t)nb->vcount);
+        ref_cap = ref != nullptr ? nb->vcount : 0;
+    }
+    M_NatWaterC(bind, inst, il, nb, buf);
+    for (int32_t v = 0; v < nb->vcount && v < ref_cap; v++) {
+        ref[v] = buf[v].argb;
+    }
+    dc_nat_water(&w);
+    static uint32_t runs;
+    static uint32_t bad;
+    for (int32_t v = 0; v < nb->vcount && v < ref_cap; v++) {
+        runs++;
+        if (ref[v] != buf[v].argb && bad++ < 6) {
+            LOG_WARNING(
+                "[natwater-verify] vertex %d asm %08x C %08x", (int)v,
+                (unsigned)buf[v].argb, (unsigned)ref[v]);
+        }
+    }
+    static uint32_t calls;
+    if (++calls % 500 == 0) {
+        LOG_WARNING(
+            "[natwater-verify] %u vertices, %u different", (unsigned)runs,
+            (unsigned)bad);
+    }
+#else
+    dc_nat_water(&w);
+#endif
+}
+
+static void M_NatWaterC(
     const M_BINDING *const bind, const MESH_INSTANCE *const inst,
     const M_INSTANCE_LIGHT *const il, const M_NAT_BATCH *const nb,
     M_XVERT *const buf)
@@ -6117,12 +6449,22 @@ static uint32_t M_ObjHashF(uint32_t h, const float f)
     return (h ^ (bits >> ((g_DC_AsmOff2 & 16384) != 0 ? 8 : 17))) * 16777619u;
 }
 
+_Static_assert(offsetof(M_INSTANCE_LIGHT, adder) == 12, "dc_obj_key");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3) == 17, "dc_obj_key");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3_double) == 20, "dc_obj_key");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3_count) == 36, "dc_obj_key");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3_dir) == 40, "dc_obj_key");
+_Static_assert(offsetof(M_INSTANCE_LIGHT, tr3_color) == 76, "dc_obj_key");
+extern uint32_t dc_obj_key(
+    const uint32_t ints[9], const M_INSTANCE_LIGHT *il, int32_t shift);
+static uint32_t M_ObjKeyC(const uint32_t ints[9], const M_INSTANCE_LIGHT *il);
+
 static uint32_t M_ObjKey(
     const MESH_BATCHER *const batcher, const M_BINDING *const bind,
     const MESH_INSTANCE *const inst, const M_INSTANCE_LIGHT *const il,
     const M_XFORM *const c)
 {
-    if (!g_DC_NativeRooms || c->fog || c->ortho || batcher->cel
+    if (!M_ObjCacheOn() || c->fog || c->ortho || batcher->cel
         || batcher->env || bind->deforms || bind->vref != nullptr
         || (bind->flags_or & VERT_NO_FOG) != 0 || il->caustics
         || !m_Frame.lighting || bind->vertex_count > 4096) {
@@ -6133,8 +6475,36 @@ static uint32_t M_ObjKey(
         M_TintK(inst->tint.a), M_TintK(inst->tint.r), M_TintK(inst->tint.g),
         M_TintK(inst->tint.b), (uint32_t)M_ShadeLow(), bind->white,
     };
+    // In assembly (inst_sh4.S, dc_obj_key); TRX_DC_ASMOFF3 bit 131072 turns
+    // it off. The C below is its reference.
+    if ((g_DC_AsmOff3 & 131072) == 0) {
+        const uint32_t key = dc_obj_key(
+            ints, il, (g_DC_AsmOff2 & 16384) != 0 ? 8 : 17);
+    #if defined(DC_EMIT_VERIFY)
+        const uint32_t want = M_ObjKeyC(ints, il);
+        static uint32_t runs;
+        static uint32_t bad;
+        if (key != want && bad++ < 6) {
+            LOG_WARNING(
+                "[objkey-verify] MISMATCH asm %08x C %08x", (unsigned)key,
+                (unsigned)want);
+        }
+        if (++runs % 20000 == 0) {
+            LOG_WARNING(
+                "[objkey-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+    #endif
+        return key;
+    }
+    return M_ObjKeyC(ints, il);
+}
+
+static uint32_t M_ObjKeyC(
+    const uint32_t ints[9], const M_INSTANCE_LIGHT *const il)
+{
     uint32_t h = 2166136261u;
-    for (size_t i = 0; i < sizeof(ints) / sizeof(ints[0]); i++) {
+    for (size_t i = 0; i < 9; i++) {
         h = (h ^ ints[i]) * 16777619u;
     }
     h = M_ObjHashF(h, il->adder);
@@ -6848,6 +7218,11 @@ static bool M_TransformInstance(
         m_RoomSetupUs[0] += setup_t1 - setup_t0;
         m_RoomSetupUs[1] += setup_t2 - setup_t1;
     }
+    // A room in the baked batches' way, under a soft shadow: which of its
+    // chunks the shadow reaches (before XMTRX takes the room's matrix).
+    const bool soft_hits = m_Soft.active && bind->needs_room_lights
+        && bind->chunk_count > 0 && bind->nat != nullptr && M_NatRoomsOn()
+        && M_SoftChunksHit(batcher, bind, m_SoftHit);
     mat_load(&batcher->mv);
 
     int32_t transformed = bind->vertex_count;
@@ -6878,7 +7253,12 @@ static bool M_TransformInstance(
             transformed = 0;
             const bool faded = inst->tint.a < 1.0f;
             batcher->cel_emit = batcher->cel && !faded;
-            const bool native = g_DC_NativeRooms && bind->nat != nullptr
+            // The relief reads the corners' way, on the chunks within its
+            // reach (M_EmitBump's limits, a passing light's the farthest),
+            // and so do the soft shadows, on the chunks they fall on.
+            const bool relief = m_Frame.bump && m_Frame.lighting && !faded
+                && batcher->z_near <= M_ReliefReach();
+            const bool native = M_NatRoomsOn() && bind->nat != nullptr
                 && !bind->deforms && !batcher->cel && !batcher->cel_dark;
             m_NatRooms[native ? 0 : bind->nat == nullptr ? 1 : 2]++;
             // The instance's light with its dynamic lights taken out, for the
@@ -6938,7 +7318,8 @@ static bool M_TransformInstance(
                     }
                 }
 #endif
-                if (native && k >= 0
+                if (native && k >= 0 && !(soft_hits && m_SoftHit[k])
+                    && !(relief && m_ChunkZNear[k] <= M_ReliefReach())
                     && M_DrawNative(
                         batcher, bind, inst, ilk, &c, &bind->chunks[k], scale,
                         faded, black_fog)) {
@@ -7910,7 +8291,12 @@ static int32_t M_EmitRunFast(
             return 0;
         }
     }
-    dc_emit_run(&run);
+    // A native room's batch has its map (the real build's dc_emit_run_map).
+    if (batcher->nat_map != nullptr) {
+        dc_emit_run_map(&run);
+    } else {
+        dc_emit_run(&run);
+    }
     if (run.used > 0) {
         m_Verify.active = true;
         m_Verify.end = indices + run.used;
@@ -8543,6 +8929,57 @@ static void M_EmitSoftShadows(
     m_DepthBias = 1.0f;
 }
 
+static float M_ReliefReach(void)
+{
+    return MAX(M_BUMP_RANGE, M_BUMP_GLOW_RANGE) * M_BUMP_LIGHT_REACH;
+}
+
+static bool M_SoftChunksHit(
+    const MESH_BATCHER *const batcher, const M_BINDING *const bind,
+    bool *const hit)
+{
+    // M_EmitShadowFaces' own tests: the room's box, then each chunk's.
+    bool any = false;
+    memset(hit, 0, sizeof(bool) * (size_t)bind->chunk_count);
+    for (int32_t l = 0; l < M_SOFT_CELLS; l++) {
+        if (!m_Soft.cell_active[l]) {
+            continue;
+        }
+        const float *const c = m_Soft.center_eye[l];
+        const float(*const axes)[3] = m_Soft.axes_eye[l];
+        const float inv_span = 1.0f / M_SOFT_SPAN;
+        matrix_t m __attribute__((aligned(8))) = {
+            { axes[1][0] * inv_span, axes[2][0] * inv_span, axes[0][0], 0.0f },
+            { axes[1][1] * inv_span, axes[2][1] * inv_span, axes[0][1], 0.0f },
+            { axes[1][2] * inv_span, axes[2][2] * inv_span, axes[0][2], 0.0f },
+            {
+                0.5f - M_Dot3(c, axes[1]) * inv_span,
+                0.5f - M_Dot3(c, axes[2]) * inv_span,
+                -M_Dot3(c, axes[0]),
+                1.0f,
+            },
+        };
+        const M_SOFT_LIGHT *const light = &m_Soft.lights[l];
+        const bool persp = light->dist < M_PARALLEL_DIST;
+        mat_load(&m);
+        mat_apply(&batcher->mv);
+        if (M_SoftBoxOff(
+                bind->bounds[0], bind->bounds[1], persp, light->dist, true)) {
+            continue;
+        }
+        for (int32_t k = 0; k < bind->chunk_count; k++) {
+            if (!hit[k]
+                && !M_SoftBoxOff(
+                    bind->chunks[k].lo, bind->chunks[k].hi, persp, light->dist,
+                    true)) {
+                hit[k] = true;
+                any = true;
+            }
+        }
+    }
+    return any;
+}
+
 // A caster's own share of the nearest light's shadow: the silhouette of the
 // casters in the slices nearer the light than its own (see M_SOFT_SLICES).
 static void M_EmitSelfShadow(
@@ -8835,11 +9272,10 @@ static inline void M_BumpGatherLightsC(
     }
 }
 
-// TRX_DC_ASMOFF2 bit 2147483648 (off by default, unlike the other bits) puts
-// this gathering (used by the cached relief's corners) in assembly
+// This gathering (used by the cached relief's corners) in assembly
 // (bump_sh4.S): no faster than the C in the strict Flycast (DC build 1535),
-// to be weighed on a console. DC_EMIT_VERIFY runs both and compares them.
-#define M_BUMP_ASM_SHINE 2147483648u
+// on by default for the console all the same. TRX_DC_ASMOFF3 bit 256 turns
+// it off. DC_EMIT_VERIFY runs both and compares them.
 _Static_assert(offsetof(M_BUMP_LIGHTS, radius) == 192, "dc_bump_gather");
 _Static_assert(offsetof(M_BUMP_LIGHTS, power) == 256, "dc_bump_gather");
 _Static_assert(offsetof(M_BUMP_LIGHTS, passing) == 320, "dc_bump_gather");
@@ -8851,7 +9287,7 @@ static inline void M_BumpGatherLights(
     const M_BUMP_LIGHTS *const lights, const float pos[3], float room_pos[3],
     float *const room_total, float passing_pos[3], float *const passing)
 {
-    if ((g_DC_AsmOff2 & M_BUMP_ASM_SHINE) == 0) {
+    if ((g_DC_AsmOff3 & 256) != 0) {
         M_BumpGatherLightsC(
             lights, pos, room_pos, room_total, passing_pos, passing);
         return;
@@ -13661,6 +14097,138 @@ static void M_SilProject(M_SILRUN *const run, const M_BINDING *const bind)
 #endif
 }
 
+// The silhouette's face loop in assembly (soft_sh4.S, dc_sil_faces): the
+// layout of its block. ASMOFF3 bit 2048 turns it off.
+typedef struct {
+    const OUTPUT_MESH_INDEX *indices; // 0
+    int32_t count; // 4
+    int32_t j; // 8
+    const float *xy; // 12
+    const float *lefts; // 16
+    int32_t cells; // 20
+    float top; // 24
+    float z; // 28
+    uint8_t *out; // 32
+    size_t room; // 36
+    size_t bytes; // 40
+    int32_t polys; // 44
+    float scale_x; // 48
+    float scale_y; // 52
+} M_SILFACES;
+_Static_assert(sizeof(M_SILFACES) == 56, "dc_sil_faces' block");
+_Static_assert(sizeof(pvr_vertex_t) == 32, "dc_sil_faces' vertex");
+extern void dc_sil_faces(M_SILFACES *run);
+
+#if defined(DC_EMIT_VERIFY)
+// dc_sil_faces in C, for the verify builds: the same bytes from the same faces.
+static void M_SilFacesRef(M_SILFACES *const f)
+{
+    pvr_vertex_t *out = (pvr_vertex_t *)f->out;
+    size_t left = f->room;
+    f->polys = 0;
+    while (f->j + 2 < f->count && left >= (size_t)(128 * f->cells)) {
+        const OUTPUT_MESH_INDEX *const t = &f->indices[f->j];
+        const bool quad = f->j + 5 < f->count && M_IsQuad(t);
+        const bool front0 = M_SilFront(t[0], t[1], t[2]);
+        const bool front1 = quad && M_SilFront(t[3], t[4], t[5]);
+        for (int32_t k = 0; k < f->cells; k++) {
+            const OUTPUT_MESH_INDEX corners[2][4] = {
+                { t[0], t[1], t[2], t[5] }, { t[3], t[4], t[5], 0 }
+            };
+            for (int32_t h = 0; h < 3; h++) {
+                int32_t n = 0;
+                const OUTPUT_MESH_INDEX *c = nullptr;
+                if (h == 0 && front0 && front1) {
+                    n = 4;
+                    c = corners[0];
+                } else if (h == 1 && front0 && !(front0 && front1)) {
+                    n = 3;
+                    c = corners[0];
+                } else if (h == 2 && front1 && !(front0 && front1)) {
+                    n = 3;
+                    c = corners[1];
+                }
+                for (int32_t v = 0; v < n; v++) {
+                    const DC_PVR_VERTEX in = M_SilVertex(
+                        f->lefts[k], f->top, c[v], f->z);
+                    out->flags = v == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+                    out->x = in.x * f->scale_x;
+                    out->y = in.y * f->scale_y;
+                    out->z = in.z;
+                    out->u = 0.0f;
+                    out->v = 0.0f;
+                    out->argb = in.argb;
+                    out->oargb = 0;
+                    out++;
+                }
+                if (n > 0) {
+                    f->polys++;
+                    left -= (size_t)n * sizeof(pvr_vertex_t);
+                }
+            }
+        }
+        f->j += quad ? 6 : 3;
+    }
+    f->bytes = (uint8_t *)out - f->out;
+}
+#endif
+
+// The face loop of a silhouette by dc_sil_faces, in runs of the list.
+static void M_SilFacesAsm(M_SILFACES *const f)
+{
+    while (f->j + 2 < f->count) {
+        size_t space;
+        bool header;
+        uint8_t *const out = DC_PVR_BeginRun(&space, &header);
+        if (out == nullptr) {
+            return;
+        }
+        const int32_t from = f->j;
+        f->out = out;
+        f->room = space;
+#if defined(DC_EMIT_VERIFY)
+        static uint8_t *ref = nullptr;
+        static size_t ref_cap = 0;
+        if (space > ref_cap) {
+            free(ref);
+            ref = malloc(space);
+            ref_cap = ref != nullptr ? space : 0;
+        }
+        M_SILFACES r = *f;
+        r.out = ref;
+        r.room = MIN(space, ref_cap);
+        if (ref != nullptr) {
+            M_SilFacesRef(&r);
+        }
+#endif
+        dc_sil_faces(f);
+#if defined(DC_EMIT_VERIFY)
+        static uint32_t runs;
+        static uint32_t bad;
+        runs++;
+        if (ref != nullptr
+            && (r.j != f->j || r.bytes != f->bytes || r.polys != f->polys
+                || memcmp(ref, out, f->bytes) != 0)) {
+            if (bad++ < 6) {
+                LOG_WARNING(
+                    "[silfaces-verify] MISMATCH j %d/%d bytes %u/%u polys %d/%d",
+                    (int)r.j, (int)f->j, (unsigned)r.bytes, (unsigned)f->bytes,
+                    (int)r.polys, (int)f->polys);
+            }
+        }
+        if (runs % 2000 == 0) {
+            LOG_WARNING(
+                "[silfaces-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+#endif
+        DC_PVR_EndRun(f->bytes, f->polys, header);
+        if (f->j == from) {
+            return; // not even one face's room: the list is full
+        }
+    }
+}
+
 static void M_DrawSilhouettes(const int32_t l)
 {
     const M_SOFT_LIGHT *const light = &m_Soft.lights[l];
@@ -13737,6 +14305,22 @@ static void M_DrawSilhouettes(const int32_t l)
         const OUTPUT_MESH_INDEX *const indices =
             Vector_GetData(mesh->opaque_vertex_indices);
         const int32_t count = mesh->opaque_vertex_indices->count;
+        if ((g_DC_AsmOff3 & 2048) == 0) {
+            M_SILFACES f = {
+                .indices = indices,
+                .count = count,
+                .j = 0,
+                .xy = &m_SoftXY[0][0],
+                .lefts = lefts,
+                .cells = cells,
+                .top = top,
+                .z = z_near,
+                .scale_x = DC_PVR_GetScreenScaleX(),
+                .scale_y = DC_PVR_GetScreenScale(),
+            };
+            M_SilFacesAsm(&f);
+            continue;
+        }
         int32_t j = 0;
         while (j + 2 < count) {
             const OUTPUT_MESH_INDEX *const t = &indices[j];

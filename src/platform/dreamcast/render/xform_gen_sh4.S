@@ -541,11 +541,76 @@ gx_nocel:
     mov.l   r13,@(r0,r8)
     FL      fr4, 8
     RS      fr4, 160
-    mov     r8,r4
+    mov     r8,r1
+    add     #127,r1
+    add     #41,r1                  ! run + 296
+    mov.l   @r1,r4                  ! the reflection's block, filled once
+    tst     r4,r4
+    bf      gx_envfast
+    mov     r8,r4                   ! or through the C (verify, or the C's bit)
     add     #-128,r4
     RL      r1, 116
     jsr     @r1
     nop
+    bra     gx_noenv
+    nop
+gx_envfast:
+    ! The vertex's own numbers into the block, then dc_env_vertex itself.
+    mov.l   @(4,r1),r2              ! env_uv
+    mov.l   @(8,r1),r3              ! eargb
+    RL      r1, 140                 ! this vertex's index
+    mov     r1,r0
+    shll2   r0
+    add     r0,r3
+    mov.l   r3,@(4,r4)              ! &eargb[i]
+    shll    r0
+    add     r0,r2
+    mov.l   r2,@r4                  ! env_uv[i]
+    mov     r4,r1
+    add     #8,r1
+    mov.w   @(16,r13),r0
+    lds     r0,fpul
+    float   fpul,fr0
+    fmov.s  fr0,@r1                 ! the normal
+    add     #4,r1
+    mov.w   @(18,r13),r0
+    lds     r0,fpul
+    float   fpul,fr0
+    fmov.s  fr0,@r1
+    add     #4,r1
+    mov.w   @(20,r13),r0
+    lds     r0,fpul
+    float   fpul,fr0
+    fmov.s  fr0,@r1
+    add     #40,r1                  ! x y z, keep, lit
+    RF      fr0, 148
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 152
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 156
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 160
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 164
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 168
+    fmov.s  fr0,@r1
+    add     #4,r1
+    RF      fr0, 172
+    fmov.s  fr0,@r1
+    mov.l   .Lgx_env,r1
+    jsr     @r1
+    nop
+    bra     gx_noenv
+    nop
+    .align 2
+.Lgx_env:
+    .long   _dc_env_vertex
 gx_noenv:
 
     add     #32,r10

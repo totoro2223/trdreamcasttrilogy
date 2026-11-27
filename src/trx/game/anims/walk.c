@@ -68,6 +68,18 @@ static void M_EnterJoint(ANIM_WALK *const walk)
 {
     const ANIM_POSE *const pose = &walk->desc.pose;
     const ANIM_BONE *const bone = &walk->bones[walk->joint - 1];
+#if defined(__DREAMCAST__)
+    if (Matrix_DC_WalkJoint(
+            bone->matrix_pop, bone->matrix_push, bone->pos,
+            pose->rots_a != nullptr ? &pose->rots_a[walk->joint] : nullptr,
+            pose->rots_a != nullptr ? &pose->rots_b[walk->joint] : nullptr,
+            walk->interpolated)) {
+        walk->depth += (bone->matrix_push ? 1 : 0) - (bone->matrix_pop ? 1 : 0);
+        Object_ApplyExtraRotation(
+            &walk->extra_rotation, bone->rot, walk->interpolated);
+        return;
+    }
+#endif
     if (bone->matrix_pop) {
         walk->depth--;
         M_Pop(walk->interpolated);

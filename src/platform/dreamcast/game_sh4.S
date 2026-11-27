@@ -735,10 +735,11 @@ m3_put:
 !
 ! The original games' pose blend, M_InterpolateLinear: every one of the twelve
 ! entries goes frac/rate of the way from m1 to m2 (p: frac, rate, 2^32-1 / rate).
-! The caller has the rate above 0 and frac < 32 or (rate 2, frac 1). The
-! average case is (a+b)>>1 in 64 bits; the rest is a + (d*frac)/rate by the
-! reciprocal, d = b-a. If some d lies outside +-(2^26-1) nothing is written and
-! the result is 0 (the C divides in 64 bits there). out may be m1.
+! The caller has the rate above 0 and frac in 0..rate. The average case
+! (rate 2, frac 1) is (a+b)>>1 in 64 bits; the rest is a + (d*frac)/rate by
+! the reciprocal, d = b-a. If some d*frac does not fit 32 bits (as the C tells
+! it) nothing is written and the result is 0 (the C divides in 64 bits
+! there). out may be m1.
     .global _dc_blend12
     .align 2
 _dc_blend12:
@@ -777,8 +778,7 @@ bl_avg:
     bra     bl_ok
     nop
 bl_gen:
-    mov.l   .Lbk26,r12
-    mov.l   .Lbk27,r13
+    mov.l   .Lbkmin,r12
     mov     #12,r11
 bl_chk:
     mov.l   @r5+,r0
@@ -793,8 +793,15 @@ bl_chk:
     subc    r1,r1                   ! the sign of the low word
     cmp/eq  r1,r3
     bf      bl_fail
-    add     r12,r2
-    cmp/hi  r13,r2
+    dmuls.l r2,r8                   ! d * frac, in 64 bits
+    sts     macl,r1
+    sts     mach,r3
+    mov     r1,r2
+    shll    r2
+    subc    r2,r2
+    cmp/eq  r2,r3                   ! fits 32 bits
+    bf      bl_fail
+    cmp/eq  r12,r1                  ! and is not INT32_MIN (the C's bound)
     bt      bl_fail
     dt      r11
     bf      bl_chk
@@ -863,10 +870,8 @@ bl_fail:
     rts
     mov     #0,r0
     .align 2
-.Lbk26:
-    .long   67108863
-.Lbk27:
-    .long   134217726
+.Lbkmin:
+    .long   0x80000000
 
 ! void dc_rot_yxz_f(MATRIX *const *ms, int32_t n, const int32_t *p);
 !
@@ -3299,3 +3304,347 @@ dd_out:
     .long   32767
 .Ldd_sqrt:
     .long   _dc_sqrt32
+
+! void dc_ai_info(const DC_AI_BLOCK *b);   creature/common.c Creature_AIInfo
+!
+! Creature_AIInfo for TR1 and TR2 once the enemy is chosen: the box under the
+! creature and under its enemy (Room_GetWorldSector, written back to both
+! items), their zones, the blocked bit, the pivot ahead of the creature
+! turned by its yaw (XYZ_32_RotateYaw), the distance (30 blocks at most), the
+! angles (dc_ai_angles), ahead and bite.
+! b: 0 the item  4 the enemy  8 the AI_INFO  12 the zone (int16[])
+!    16 the rooms  20 the boxes (or 0)  24 how many  28 the pivot length
+!    32 1: the enemy is Lara crouching  36 1: TR1  40 the LOT_INFO
+!    44 creature->enemy  48 the fixed zone of TR3's flyers (or -1)
+!    52 the enemy's x and 56 z (TR3: ahead of it)  60 the farthest  64 it
+!    squared  68 1: past it, no distance at all (TR3)  72 the bite's reach
+!    76 the sine routine
+! ITEM: 32 room_num  42 hit_points  46 box_num  100 pos  112 rot (int16 x y z)
+! ROOM (192 bytes): 44 sectors  56 pos.x  64 pos.z  76 size.z  78 size.x
+! SECTOR (48): 34 box.  BOX_INFO (24): 20 overlap_index.  BOX_NODE (8): 2
+! search_num.  LOT_INFO: 8 block_mask  20 node  28 search_num.
+! AI_INFO: 0 zone_num  2 enemy_zone_num  4 distance  8 ahead  9 bite
+! 10 angle  12 x_angle  14 enemy_facing.
+
+! v held to 0..hi (CLAMP).
+    .macro CLAMP0 v, hi
+    cmp/pz  \v
+    bt      61f
+    mov     #0,\v
+61: cmp/gt  \hi,\v
+    bf      62f
+    mov     \hi,\v
+62:
+    .endm
+
+    .global _dc_ai_info
+    .align 2
+_dc_ai_info:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    add     #-36,r15                ! p[8] for dc_ai_angles, the enemy's box
+    mov     r4,r14
+    mov.l   @r14,r8                 ! the item
+    mov.l   @(4,r14),r9             ! the enemy
+    mov.l   @(12,r14),r10           ! the zone
+    mov.l   @(16,r14),r11           ! the rooms
+    mov.l   @(8,r14),r13            ! the AI_INFO
+    bsr     aif_box
+    mov     r8,r4
+    mov     r0,r12                  ! the item's box
+    add     r0,r0
+    mov.w   @(r0,r10),r1
+    mov.w   r1,@r13                 ! zone_num
+    bsr     aif_box
+    mov     r9,r4
+    mov.l   r0,@(32,r15)            ! the enemy's box
+    add     r0,r0
+    mov.w   @(r0,r10),r2            ! enemy_zone_num
+    mov.l   @(48,r14),r0            ! TR3's flyers: one fixed zone for both
+    cmp/pz  r0
+    bf      1f
+    mov.w   r0,@r13
+    mov     r0,r2
+1:
+    mov.l   @(40,r14),r3            ! the LOT_INFO
+    mov.l   @(20,r14),r1            ! the boxes
+    tst     r1,r1
+    bt      aif_node
+    mov.l   @(32,r15),r0
+    mov.l   @(24,r14),r4
+    cmp/hs  r4,r0                   ! past the boxes (or below 0)
+    bt      aif_node
+    mov     r0,r4
+    shll2   r4
+    shll    r4
+    mov     r4,r5
+    add     r4,r4
+    add     r5,r4                   ! 24 box
+    add     r4,r1
+    mov.l   @(20,r1),r1             ! overlap_index
+    mov.l   @(8,r3),r4              ! block_mask
+    tst     r4,r1
+    bf      aif_blocked
+aif_node:
+    mov.l   @(20,r3),r1             ! the nodes
+    mov     r12,r0
+    shll2   r0
+    shll    r0
+    add     r0,r1
+    mov.w   @(2,r1),r0
+    extu.w  r0,r1                   ! the node's search_num
+    mov     #28,r0
+    mov.w   @(r0,r3),r0
+    extu.w  r0,r0
+    mov.l   .Lai_8000,r4
+    or      r4,r0                   ! | BOX_BLOCKED_SEARCH
+    cmp/eq  r0,r1
+    bf      aif_zone
+aif_blocked:
+    mov.l   .Lai_4000,r4
+    or      r4,r2
+aif_zone:
+    mov     r2,r0
+    mov.w   r0,@(2,r13)             ! enemy_zone_num
+
+    mov.l   @(28,r14),r10           ! the pivot length
+    mov     #114,r0
+    mov.w   @(r0,r8),r4             ! rot.y
+    tst     r4,r4
+    bf      aif_turn
+    mov     #0,r11                  ! pivot x
+    bra     aif_pos
+    mov     r10,r12                 ! pivot z
+aif_turn:
+    mov     #76,r0
+    mov.l   @(r0,r14),r1            ! the sine (TR3: the coarse)
+    jsr     @r1
+    nop
+    dmuls.l r0,r10
+    sts     macl,r11
+    sts     mach,r1
+    shlr8   r11
+    shlr2   r11
+    shlr2   r11
+    shlr2   r11
+    shll16  r1
+    shll2   r1                      ! (p sin) >> 14
+    or      r1,r11
+    mov     #114,r0
+    mov.w   @(r0,r8),r4
+    mov.l   .Lai_90,r1
+    add     r1,r4
+    mov     #76,r0
+    mov.l   @(r0,r14),r1            ! the sine (TR3: the coarse)
+    jsr     @r1
+    nop
+    dmuls.l r0,r10
+    sts     macl,r12
+    sts     mach,r1
+    shlr8   r12
+    shlr2   r12
+    shlr2   r12
+    shlr2   r12
+    shll16  r1
+    shll2   r1
+    or      r1,r12                  ! (p cos) >> 14
+aif_pos:
+    mov.l   @(52,r14),r4            ! the enemy's x (TR3: ahead of it)
+    mov     #100,r0
+    mov.l   @(r0,r8),r1
+    sub     r11,r4
+    sub     r1,r4                   ! x
+    mov.l   @(56,r14),r5            ! its z
+    mov     #108,r0
+    mov.l   @(r0,r8),r1
+    sub     r12,r5
+    sub     r1,r5                   ! z
+    mov     #104,r0
+    mov.l   @(r0,r8),r6             ! item y
+    mov.l   @(r0,r9),r1
+    sub     r1,r6                   ! y, reversed as in the C
+    mov.l   @(32,r14),r0
+    tst     r0,r0
+    bt      1f
+    mov.l   .Lai_384,r1
+    sub     r1,r6
+1:  mov.l   r4,@r15
+    mov.l   r5,@(4,r15)
+    mov.l   r6,@(8,r15)
+    mov     #114,r0
+    mov.w   @(r0,r8),r1
+    mov.l   r1,@(12,r15)            ! rot_y
+    mov.w   @(r0,r9),r1
+    mov.l   r1,@(16,r15)            ! the enemy's rot_y
+    mov.l   @(60,r14),r1            ! the farthest
+    mov     r4,r2
+    cmp/pz  r2
+    bt      1f
+    neg     r2,r2
+1:  mov     r5,r3
+    cmp/pz  r3
+    bt      1f
+    neg     r3,r3
+1:  mov.l   @(44,r14),r0
+    tst     r0,r0
+    bt      aif_none
+    cmp/gt  r1,r3
+    bt      aif_far
+    cmp/gt  r1,r2
+    bt      aif_far
+    mul.l   r4,r4
+    sts     macl,r0
+    mul.l   r5,r5
+    sts     macl,r2
+    bra     aif_dist
+    add     r2,r0
+aif_none:
+    mov.l   .Lai_imax,r0
+    bra     aif_dist
+    nop
+aif_far:
+    mov     #68,r0
+    mov.l   @(r0,r14),r0            ! TR3: none
+    tst     r0,r0
+    bf      aif_none
+    mov     #64,r0
+    mov.l   @(r0,r14),r0            ! the farthest, squared
+aif_dist:
+    mov.l   r0,@(4,r13)             ! distance
+    mov.l   .Lai_angles,r1
+    jsr     @r1
+    mov     r15,r4
+    mov.l   @(20,r15),r0
+    mov.w   r0,@(10,r13)            ! angle
+    mov.l   @(28,r15),r0
+    mov.w   r0,@(12,r13)            ! x_angle
+    mov.l   @(24,r15),r0
+    mov.w   r0,@(14,r13)            ! enemy_facing
+    mov.w   @(10,r13),r0            ! the angle as int16
+    mov.l   .Lai_m4000,r1
+    mov     #0,r2                   ! ahead
+    cmp/gt  r1,r0
+    bf      1f
+    neg     r1,r1
+    cmp/ge  r1,r0
+    bt      1f
+    mov     #1,r2
+1:  mov     r2,r0
+    mov.b   r0,@(8,r13)
+    mov     #0,r3                   ! bite
+    tst     r2,r2
+    bt      aif_bite
+    mov     #104,r0
+    mov.l   @(r0,r9),r1
+    mov.l   @(r0,r8),r4
+    sub     r4,r1
+    cmp/pz  r1
+    bt      1f
+    neg     r1,r1
+1:  mov     #72,r0
+    mov.l   @(r0,r14),r4            ! the bite's reach
+    cmp/gt  r4,r1
+    bt      aif_bite
+    mov.l   @(36,r14),r0
+    tst     r0,r0
+    bf      1f
+    mov     #42,r0
+    mov.w   @(r0,r9),r1
+    cmp/pl  r1
+    bf      aif_bite
+1:  mov     #1,r3
+aif_bite:
+    mov     r3,r0
+    mov.b   r0,@(9,r13)
+    add     #36,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+! The box under the item at r4 (Room_GetWorldSector of its room, its x and z),
+! written to its box_num and returned in r0, sign-extended. r11: the rooms.
+aif_box:
+    mov     #32,r0
+    mov.w   @(r0,r4),r1             ! room_num
+    mov     r1,r2
+    shll2   r2
+    shll2   r2
+    shll2   r2                      ! 64 n
+    mov     r2,r3
+    add     r3,r3                   ! 128 n
+    add     r3,r2
+    add     r11,r2                  ! the room
+    mov     #100,r0
+    mov.l   @(r0,r4),r5
+    mov.l   @(56,r2),r1
+    sub     r1,r5
+    mov     #-10,r0
+    shad    r0,r5                   ! x_sector
+    mov     #108,r0
+    mov.l   @(r0,r4),r6
+    mov     #64,r0
+    mov.l   @(r0,r2),r1
+    sub     r1,r6
+    mov     #-10,r0
+    shad    r0,r6                   ! z_sector
+    mov     #78,r0
+    mov.w   @(r0,r2),r7             ! size.x
+    add     #-1,r7
+    CLAMP0  r5, r7
+    mov     #76,r0
+    mov.w   @(r0,r2),r7             ! size.z
+    add     #-1,r7
+    CLAMP0  r6, r7
+    add     #1,r7
+    mul.l   r5,r7
+    sts     macl,r1
+    add     r6,r1                   ! z + x size.z
+    shll2   r1
+    shll2   r1                      ! 16 i
+    mov     r1,r3
+    add     r1,r1
+    add     r3,r1                   ! 48 i
+    mov.l   @(44,r2),r3
+    add     r3,r1                   ! the sector
+    mov     #34,r0
+    mov.w   @(r0,r1),r1             ! its box
+    mov     #46,r0
+    mov.w   r1,@(r0,r4)
+    rts
+    mov     r1,r0
+
+    .align 2
+.Lai_8000:
+    .long   0x8000
+.Lai_4000:
+    .long   0x4000
+.Lai_sin:
+    .long   _dc_sin
+.Lai_90:
+    .long   16384
+.Lai_384:
+    .long   384
+.Lai_max:
+    .long   30720
+.Lai_max2:
+    .long   943718400
+.Lai_imax:
+    .long   0x7FFFFFFF
+.Lai_angles:
+    .long   _dc_ai_angles
+.Lai_m4000:
+    .long   -16384
+.Lai_256:
+    .long   256

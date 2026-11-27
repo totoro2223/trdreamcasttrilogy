@@ -94,6 +94,14 @@ void Matrix_TranslateSet32_M(MATRIX *out, XYZ_32 origin);
 
 void Matrix_Push_I(void);
 void Matrix_Pop_I(void);
+#if defined(__DREAMCAST__)
+// One joint of an animation walk (anims/walk.c) in assembly: pop, push, the
+// bone's offset and the pose's turn. False, with nothing done, where the
+// assembly does not apply; the caller then takes the C.
+bool Matrix_DC_WalkJoint(
+    bool pop, bool push, XYZ_32 pos, const XYZ_16 *rot, const XYZ_16 *rot_far,
+    bool interpolated);
+#endif
 
 void Matrix_RotY_I(int16_t ang);
 void Matrix_RotX_I(int16_t ang);

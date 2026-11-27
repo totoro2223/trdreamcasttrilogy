@@ -193,6 +193,36 @@ static int32_t tour_frames = 0;
 static int32_t tour_next = 0;
 static int32_t frames = 0;
 
+#if defined(__DREAMCAST__)
+// A test disc's tour (TRX_DC_TOUR), once a logic tick (Item_Control), so that
+// two runs of it go the same way: Lara stands where the next living enemy
+// is every n ticks, wakes it, and stays alive.
+void DC_TestTour_Tick(void);
+void DC_TestTour_Tick(void)
+{
+    ITEM *const tour_lara = g_DC_TestTour > 0 ? Lara_GetItem() : nullptr;
+    if (tour_lara != nullptr) {
+        tour_lara->hit_points = LARA_MAX_HITPOINTS;
+        const int32_t count =
+            ++tour_frames % g_DC_TestTour == 0 ? Item_GetLevelCount() : 0;
+        for (int32_t k = 1; k <= count; k++) {
+            const int16_t num = (int16_t)((tour_next + k) % count);
+            const ITEM *const item = Item_Get(num);
+            if (item == tour_lara || item->hit_points <= 0
+                || !Object_Get(item->object_id)->intelligent) {
+                continue;
+            }
+            tour_next = num;
+            Item_Activate(num, true);
+            tour_lara->pos = item->pos;
+            Item_UpdateRoom(Lara_GetLaraInfo()->item_num, item->room_num);
+            LOG_INFO("test: tour at item %d (object %d)", num, item->object_id);
+            break;
+        }
+    }
+}
+#endif
+
 // Feeds the time a frame took to the mode, which drops from 60 to 30 fps in
 // scenes too heavy for 60; the clock starts afresh at the change.
 static void M_ReportWork(const Uint64 start)
@@ -287,27 +317,6 @@ static void M_ReportWork(const Uint64 start)
     if (fire_every > 0 && ++fire_frames % fire_every == 0) {
         Gun_Smoke_OnFire(LGT_PISTOLS, true);
         Gun_Smoke_OnFire(LGT_PISTOLS, false);
-    }
-    // Lara stands where the next living enemy is, wakes it, and stays alive.
-    ITEM *const tour_lara = g_DC_TestTour > 0 ? Lara_GetItem() : nullptr;
-    if (tour_lara != nullptr) {
-        tour_lara->hit_points = LARA_MAX_HITPOINTS;
-        const int32_t count =
-            ++tour_frames % g_DC_TestTour == 0 ? Item_GetLevelCount() : 0;
-        for (int32_t k = 1; k <= count; k++) {
-            const int16_t num = (int16_t)((tour_next + k) % count);
-            const ITEM *const item = Item_Get(num);
-            if (item == tour_lara || item->hit_points <= 0
-                || !Object_Get(item->object_id)->intelligent) {
-                continue;
-            }
-            tour_next = num;
-            Item_Activate(num, true);
-            tour_lara->pos = item->pos;
-            Item_UpdateRoom(Lara_GetLaraInfo()->item_num, item->room_num);
-            LOG_INFO("test: tour at item %d (object %d)", num, item->object_id);
-            break;
-        }
     }
     if (g_DC_TestSwitchMode >= 0 && ++frames == g_DC_TestSwitchFrame) {
         LOG_INFO("test: the mode is now %d", (int)g_DC_TestSwitchMode);

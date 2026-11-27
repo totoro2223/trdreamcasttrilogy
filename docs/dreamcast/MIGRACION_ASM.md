@@ -49,6 +49,12 @@ que las rutinas nuevas se apagan con `TRX_DC_ASMOFF2` (`ASMOFF.TXT` lleva dos n�
 | `dc_surface_height` | `M_GetSurfaceHeight`: suelos y techos planos, inclinados y partidos | ASMOFF2 524288 | autoprueba 200 000 superficies + 3,4 millones de llamadas reales en Antártida, 0 distintas |
 | `dc_box_search`, `dc_box_target`, `dc_creature_turn`, `dc_ai_angles`, `dc_anim_change` | ruta de criaturas (`Box_SearchLOT`, paseo de `Box_CalculateTarget`), `Creature_Turn`, ángulos de `Creature_AIInfo`, `Item_GetAnimChange` | ASMOFF2 16384, 65536, 32768, 262144, 131072 | demo Vilcabamba TR1: 2000, 3000, 2000, 3000 y 800 llamadas, 0 distintas |
 | `dc_soft_faces`, `dc_sil_project`, `dc_casters_center` (`soft_sh4.S`) | recepción y siluetas de las sombras suaves (Lara y enemigos) | ASMOFF2 128, 512, 256 | `[softfaces-verify]`, `[sil-verify]`, `[center-verify]`: 0 distintas |
+| `dc_walk_joint` (`pose_sh4.S`) | un hueso del recorrido del esqueleto (`M_EnterJoint`: pop, push, desplazamiento y giro de las dos poses), con la pila de mundo sola | ASMOFF3 8 | `[walk-verify]` 55 000 huesos, 0 distintos (las cuatro pilas y sus punteros) |
+| `dc_blend12` ampliada | la mezcla lineal (`dc_linear_pose`, la de por defecto) para cualquier `frac` cuyo `d·frac` quepa en 32 bits (antes solo `frac < 32`: con los ticks finos de 60 fps caía siempre al C) | ASMOFF 536870912 | `[blend-verify]` 78 000, 0 distintas |
+| `dc_interp_float` (`pose_sh4.S`) | la mezcla slerp (`M_InterpolateFloat`, opción "Pose blend: Slerp") | ASMOFF3 4 | `[pose-verify]` 80 000: 99,7 % idénticas, el resto ±1 en el último bit (`fipr`/`ftrv`) |
+| `dc_room_lights` (`inst_sh4.S`) | el bucle de luces de `M_PrepareRoomLights` (alcance, `M_Exp2` entero por bits) | ASMOFF3 16 | `[roomlights-verify]` 8000 (TR2 con bengala), 0 distintas |
+| `dc_ai_info` (`game_sh4.S`) | `Creature_AIInfo` de TR1/TR2 tras elegir enemigo (cajas, zonas, bloqueo, pivote, distancia, ángulos, ahead/bite) | ASMOFF3 32 | `[aiinfo-verify]` 12 000, 0 distintas |
+| `dc_bump_gather` (`bump_sh4.S`) | `M_BumpGatherLights` del relieve | ASMOFF3 256 (antes encendido solo con ASMOFF2 2147483648) | `[gather-verify]` 466 944, 0 distintas |
 
 Medida en Antártida (Flycast, 29 muestras, dos pasadas): todo en ASM 35,9 fps y todo en C 36,2 fps,
 es decir, sin mejora en el emulador (la lógica sube ~1,2 unidades de 0,07 ms; el aislamiento por
@@ -121,6 +127,7 @@ Ganchos de prueba (todos en `tools/dreamcast/make_disc.sh`): `TRX_DC_GIVE`, `FIR
 el nivel de inicio. Las pruebas van siempre con Flycast oculto y sin sonido, salvo que se pida
 verlas.
 
+| `dc_creature_mood`, `dc_creature_animate`, `dc_target_box` (`creature_sh4.S`); `dc_hair_step` (`hair_sh4.S`); `dc_sil_faces` (`soft_sh4.S`); `dc_nat_water`, `dc_tr3_light`, `dc_fill_matrix`, `dc_obj_key` (`inst_sh4.S`) | Humor y movimiento de enemigos, caja objetivo, pelo de Lara, siluetas de la sombra suave, agua de TR3 en lotes, luz de objetos TR3, matriz de instancia, clave de la caché de colores | `[mood-verify]`, `[aiinfo-verify]`, hash de demos de Animate, `[tbox-verify]`, `[hair-verify]`, `[silfaces-verify]`, `[tr3light-verify]`, `[fillmat-verify]`, `[objkey-verify]`: 0 distintas; `[natwater-verify]` sin cobertura | pelo 911 → 113 µs |
 Reglas del SH-4 que costaron tiempo:
 - Un inmediato (`add #n`, `mov #n`) va de -128 a 127: `add #128,r15` se ensambla como -128.
 - `mov.l @(disp,Rn)` llega a 60 bytes; `mov.b`/`mov.w @(disp,Rn)` solo con R0 y desplazamientos

@@ -14,6 +14,9 @@ int16_t *Box_GetLotZone(const LOT_INFO *lot);
 bool Box_SearchLOT(LOT_INFO *lot, int32_t expansion);
 #if defined(__DREAMCAST__)
 void Box_BeginTick(void);
+// The tick's route search budget, for the verify builds that run a search
+// twice (creature/common.c).
+int32_t *Box_DC_TickExpansions(void);
 #endif
 void Box_TargetBox(LOT_INFO *lot, int16_t box_num);
 bool Box_StalkBox(const ITEM *item, const ITEM *enemy, int16_t box_num);

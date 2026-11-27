@@ -1,8 +1,45 @@
 #include <trx/game/output/utils.h>
 
 #include <trx/game/const.h>
+#include <trx/core/log.h>
+
+#include <string.h>
+
+#if defined(__DREAMCAST__)
+// In assembly (render/inst_sh4.S, dc_fill_matrix); TRX_DC_ASMOFF3 bit 65536
+// turns it off. The C below is its reference.
+extern void dc_fill_matrix(const MATRIX *m, float out[16]);
+extern uint32_t g_DC_AsmOff3;
+static void M_FillMatrixC(GLfloat m[4][4], const MATRIX *source);
 
 void Output_FillMatrix(GLfloat m[4][4], const MATRIX *const source)
+{
+    if ((g_DC_AsmOff3 & 65536) != 0) {
+        M_FillMatrixC(m, source);
+        return;
+    }
+    dc_fill_matrix(source, &m[0][0]);
+    #if defined(DC_EMIT_VERIFY)
+    GLfloat ref[4][4];
+    M_FillMatrixC(ref, source);
+    static uint32_t runs;
+    static uint32_t bad;
+    if (memcmp(ref, m, sizeof(ref)) != 0 && bad++ < 6) {
+        LOG_WARNING(
+            "[fillmat-verify] MISMATCH %08x %08x", *(const uint32_t *)&ref[3][0],
+            *(const uint32_t *)&m[3][0]);
+    }
+    if (++runs % 20000 == 0) {
+        LOG_WARNING(
+            "[fillmat-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    #endif
+}
+
+static void M_FillMatrixC(GLfloat m[4][4], const MATRIX *const source)
+#else
+void Output_FillMatrix(GLfloat m[4][4], const MATRIX *const source)
+#endif
 {
 #if defined(__DREAMCAST__)
     const float k = 1.0f / (float)(1 << W2V_SHIFT);

@@ -23,6 +23,7 @@
 #include <trx/game/sparks.h>
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #if defined(__DREAMCAST__)
@@ -270,6 +271,195 @@ static void M_ReduceTorsoSphere(void)
         (m_HairSpheres[1].pos.z + m_HairSpheres[2].pos.z) >> 1;
 }
 
+// The braid's segments, one after the other from the head (the C, and the
+// reference for hair_sh4.S).
+static void M_StepC(
+    const int32_t braid_idx, const ANIM_BONE *const bones,
+    const LARA_INFO *const lara_info, const int16_t room_num,
+    const int32_t water_height, const int32_t height,
+    const XZ_32 smoke_wind, const int32_t hair_wind_z)
+{
+    for (int32_t i = 1; i <= M_HAIR_SEGMENTS; i++) {
+        HAIR_SEGMENT *const ps = &m_HairSegments[braid_idx][i - 1];
+        HAIR_SEGMENT *const s = &m_HairSegments[braid_idx][i];
+
+        const XYZ_32 old_pos = s->pos;
+
+        s->pos.x += s->vel.x * 3 / 4;
+        s->pos.y += s->vel.y * 3 / 4;
+        s->pos.z += s->vel.z * 3 / 4;
+
+        if (g_Config.visuals.breeze_mode == BREEZE_MODE_TR3) {
+            if (lara_info->water_status == LWS_ABOVE_WATER
+                && Room_Get(room_num)->flags.wind) {
+                s->pos.x += smoke_wind.x;
+                s->pos.z += smoke_wind.z;
+            }
+
+            if (water_height == NO_HEIGHT || s->pos.y < water_height) {
+                s->pos.y += 10;
+                if (water_height != NO_HEIGHT && s->pos.y > water_height) {
+                    s->pos.y = water_height;
+                }
+            }
+
+            if (s->pos.y > height) {
+                s->pos.x = old_pos.x;
+                if (s->pos.y - height <= STEP_L) {
+                    s->pos.y = height;
+                }
+                s->pos.z = old_pos.z;
+            }
+        } else {
+            LARA_WATER_STATE water_status = lara_info->water_status;
+            if (water_status == LWS_WADE
+                && (water_height == NO_HEIGHT || s->pos.y <= water_height)) {
+                water_status = LWS_ABOVE_WATER;
+            }
+            switch (water_status) {
+            case LWS_ABOVE_WATER:
+                s->pos.y += 10;
+                if (water_height != NO_HEIGHT && s->pos.y > water_height) {
+                    s->pos.y = water_height;
+                } else if (s->pos.y > height) {
+                    s->pos.y = height;
+                } else {
+                    s->pos.z += hair_wind_z;
+                }
+                break;
+
+            case LWS_UNDERWATER:
+            case LWS_SURFACE:
+            case LWS_WADE:
+                CLAMP(s->pos.y, water_height, height);
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        for (int32_t j = 0; j < M_HAIR_SPHERES; j++) {
+            const SPHERE *const sphere = &m_HairSpheres[j];
+            const int32_t dx = s->pos.x - sphere->pos.x;
+            const int32_t dy = s->pos.y - sphere->pos.y;
+            const int32_t dz = s->pos.z - sphere->pos.z;
+            int32_t dist = SQUARE(dz) + SQUARE(dy) + SQUARE(dx);
+            if (dist < SQUARE(sphere->r)) {
+                dist = Math_Sqrt(dist);
+                CLAMPL(dist, 1);
+                s->pos.x = sphere->pos.x + sphere->r * dx / dist;
+                s->pos.y = sphere->pos.y + sphere->r * dy / dist;
+                s->pos.z = sphere->pos.z + sphere->r * dz / dist;
+            }
+        }
+
+        const int32_t dx = s->pos.x - ps->pos.x;
+        const int32_t dz = s->pos.z - ps->pos.z;
+        const int32_t distance = Math_Sqrt(SQUARE(dx) + SQUARE(dz));
+        ps->rot.y = Math_Atan(dz, dx);
+        ps->rot.x = -Math_Atan(distance, s->pos.y - ps->pos.y);
+
+        Matrix_PushUnit();
+        Matrix_TranslateSet32(ps->pos);
+        Matrix_RotY(ps->rot.y);
+        Matrix_RotX(ps->rot.x);
+
+        const ANIM_BONE *const bone = &bones[M_BONE_IDX(i)];
+        Matrix_TranslateRel32(bone->pos);
+
+        s->pos.x = g_MatrixPtr->_03 >> W2V_SHIFT;
+        s->pos.y = g_MatrixPtr->_13 >> W2V_SHIFT;
+        s->pos.z = g_MatrixPtr->_23 >> W2V_SHIFT;
+
+        s->vel.x = s->pos.x - old_pos.x;
+        s->vel.y = s->pos.y - old_pos.y;
+        s->vel.z = s->pos.z - old_pos.z;
+
+        Matrix_Pop();
+    }
+}
+
+#if defined(__DREAMCAST__)
+// In assembly (hair_sh4.S, dc_hair_step): its aligned block, which the
+// packed segments and bones are copied into and back out of.
+typedef struct {
+    int32_t pos[M_HAIR_SEGMENTS + 1][3];
+    int32_t vel[M_HAIR_SEGMENTS + 1][3];
+    int32_t rot[M_HAIR_SEGMENTS + 1][2];
+    int32_t bone[M_HAIR_SEGMENTS + 1][3];
+    int32_t sphere[M_HAIR_SPHERES][4];
+    int32_t water_state;
+    int32_t water_height;
+    int32_t height;
+    int32_t wind_z;
+    int32_t tr3_breeze;
+    int32_t tr3_wind_x;
+    int32_t tr3_wind_z;
+} M_HAIR_BLOCK;
+_Static_assert(offsetof(M_HAIR_BLOCK, tr3_breeze) == 404, "dc_hair_step");
+_Static_assert(offsetof(M_HAIR_BLOCK, vel) == 84, "dc_hair_step");
+_Static_assert(offsetof(M_HAIR_BLOCK, rot) == 168, "dc_hair_step");
+_Static_assert(offsetof(M_HAIR_BLOCK, bone) == 224, "dc_hair_step");
+_Static_assert(offsetof(M_HAIR_BLOCK, sphere) == 308, "dc_hair_step");
+_Static_assert(offsetof(M_HAIR_BLOCK, water_state) == 388, "dc_hair_step");
+extern void dc_hair_step(M_HAIR_BLOCK *b);
+extern uint32_t g_DC_AsmOff3;
+
+static void M_StepAsm(
+    const int32_t braid_idx, const ANIM_BONE *const bones,
+    const LARA_INFO *const lara_info, const int16_t room_num,
+    const int32_t water_height, const int32_t height, const XZ_32 smoke_wind,
+    const int32_t hair_wind_z)
+{
+    HAIR_SEGMENT *const segs = m_HairSegments[braid_idx];
+    M_HAIR_BLOCK b;
+    for (int32_t i = 0; i <= M_HAIR_SEGMENTS; i++) {
+        b.pos[i][0] = segs[i].pos.x;
+        b.pos[i][1] = segs[i].pos.y;
+        b.pos[i][2] = segs[i].pos.z;
+        b.vel[i][0] = segs[i].vel.x;
+        b.vel[i][1] = segs[i].vel.y;
+        b.vel[i][2] = segs[i].vel.z;
+        b.rot[i][0] = segs[i].rot.y;
+        b.rot[i][1] = segs[i].rot.x;
+        if (i > 0) {
+            const ANIM_BONE *const bone = &bones[M_BONE_IDX(i)];
+            b.bone[i][0] = bone->pos.x;
+            b.bone[i][1] = bone->pos.y;
+            b.bone[i][2] = bone->pos.z;
+        }
+    }
+    for (int32_t j = 0; j < M_HAIR_SPHERES; j++) {
+        b.sphere[j][0] = m_HairSpheres[j].pos.x;
+        b.sphere[j][1] = m_HairSpheres[j].pos.y;
+        b.sphere[j][2] = m_HairSpheres[j].pos.z;
+        b.sphere[j][3] = m_HairSpheres[j].r;
+    }
+    b.water_state = lara_info->water_status;
+    b.water_height = water_height;
+    b.height = height;
+    b.wind_z = hair_wind_z;
+    b.tr3_breeze = g_Config.visuals.breeze_mode == BREEZE_MODE_TR3;
+    const bool windy = b.tr3_breeze
+        && lara_info->water_status == LWS_ABOVE_WATER
+        && Room_Get(room_num)->flags.wind;
+    b.tr3_wind_x = windy ? smoke_wind.x : 0;
+    b.tr3_wind_z = windy ? smoke_wind.z : 0;
+    dc_hair_step(&b);
+    for (int32_t i = 1; i <= M_HAIR_SEGMENTS; i++) {
+        segs[i].pos.x = b.pos[i][0];
+        segs[i].pos.y = b.pos[i][1];
+        segs[i].pos.z = b.pos[i][2];
+        segs[i].vel.x = b.vel[i][0];
+        segs[i].vel.y = b.vel[i][1];
+        segs[i].vel.z = b.vel[i][2];
+        segs[i - 1].rot.y = (int16_t)b.rot[i - 1][0];
+        segs[i - 1].rot.x = (int16_t)b.rot[i - 1][1];
+    }
+}
+#endif
+
 static void M_Control(
     const bool in_cutscene, const int32_t braid_idx, const XYZ_32 offset_pos,
     const bool is_twin_setup)
@@ -379,105 +569,44 @@ static void M_Control(
     const XZ_32 smoke_wind = Sparks_GetSmokeWind();
     const int32_t hair_wind_z = Sparks_GetHairWindZ();
 
-    for (int32_t i = 1; i <= M_HAIR_SEGMENTS; i++) {
-        HAIR_SEGMENT *const ps = &m_HairSegments[braid_idx][i - 1];
-        HAIR_SEGMENT *const s = &m_HairSegments[braid_idx][i];
-
-        const XYZ_32 old_pos = s->pos;
-
-        s->pos.x += s->vel.x * 3 / 4;
-        s->pos.y += s->vel.y * 3 / 4;
-        s->pos.z += s->vel.z * 3 / 4;
-
-        if (g_Config.visuals.breeze_mode == BREEZE_MODE_TR3) {
-            if (lara_info->water_status == LWS_ABOVE_WATER
-                && Room_Get(room_num)->flags.wind) {
-                s->pos.x += smoke_wind.x;
-                s->pos.z += smoke_wind.z;
-            }
-
-            if (water_height == NO_HEIGHT || s->pos.y < water_height) {
-                s->pos.y += 10;
-                if (water_height != NO_HEIGHT && s->pos.y > water_height) {
-                    s->pos.y = water_height;
-                }
-            }
-
-            if (s->pos.y > height) {
-                s->pos.x = old_pos.x;
-                if (s->pos.y - height <= STEP_L) {
-                    s->pos.y = height;
-                }
-                s->pos.z = old_pos.z;
-            }
-        } else {
-            LARA_WATER_STATE water_status = lara_info->water_status;
-            if (water_status == LWS_WADE
-                && (water_height == NO_HEIGHT || s->pos.y <= water_height)) {
-                water_status = LWS_ABOVE_WATER;
-            }
-            switch (water_status) {
-            case LWS_ABOVE_WATER:
-                s->pos.y += 10;
-                if (water_height != NO_HEIGHT && s->pos.y > water_height) {
-                    s->pos.y = water_height;
-                } else if (s->pos.y > height) {
-                    s->pos.y = height;
-                } else {
-                    s->pos.z += hair_wind_z;
-                }
-                break;
-
-            case LWS_UNDERWATER:
-            case LWS_SURFACE:
-            case LWS_WADE:
-                CLAMP(s->pos.y, water_height, height);
-                break;
-
-            default:
-                break;
-            }
+#if defined(__DREAMCAST__)
+    // The game's own breeze, or none, in assembly (hair_sh4.S); ASMOFF3 bit
+    // 4096 turns it off.
+    if ((g_DC_AsmOff3 & 4096) == 0) {
+    #if defined(DC_EMIT_VERIFY)
+        HAIR_SEGMENT before[M_HAIR_SEGMENTS + 1];
+        HAIR_SEGMENT got[M_HAIR_SEGMENTS + 1];
+        memcpy(before, m_HairSegments[braid_idx], sizeof(before));
+    #endif
+        M_StepAsm(
+            braid_idx, bones, lara_info, room_num, water_height, height,
+            smoke_wind, hair_wind_z);
+    #if defined(DC_EMIT_VERIFY)
+        memcpy(got, m_HairSegments[braid_idx], sizeof(got));
+        memcpy(m_HairSegments[braid_idx], before, sizeof(before));
+        M_StepC(braid_idx, bones, lara_info, room_num, water_height, height,
+                smoke_wind, hair_wind_z);
+        static uint32_t runs;
+        static uint32_t bad;
+        if (memcmp(got, m_HairSegments[braid_idx], sizeof(got)) != 0
+            && bad++ < 6) {
+            LOG_WARNING(
+                "[hair-verify] MISMATCH seg1 %d %d %d / %d %d %d",
+                got[1].pos.x, got[1].pos.y, got[1].pos.z,
+                m_HairSegments[braid_idx][1].pos.x,
+                m_HairSegments[braid_idx][1].pos.y,
+                m_HairSegments[braid_idx][1].pos.z);
         }
-
-        for (int32_t j = 0; j < M_HAIR_SPHERES; j++) {
-            const SPHERE *const sphere = &m_HairSpheres[j];
-            const int32_t dx = s->pos.x - sphere->pos.x;
-            const int32_t dy = s->pos.y - sphere->pos.y;
-            const int32_t dz = s->pos.z - sphere->pos.z;
-            int32_t dist = SQUARE(dz) + SQUARE(dy) + SQUARE(dx);
-            if (dist < SQUARE(sphere->r)) {
-                dist = Math_Sqrt(dist);
-                CLAMPL(dist, 1);
-                s->pos.x = sphere->pos.x + sphere->r * dx / dist;
-                s->pos.y = sphere->pos.y + sphere->r * dy / dist;
-                s->pos.z = sphere->pos.z + sphere->r * dz / dist;
-            }
+        if (runs++ == 0 || runs % 500 == 0) {
+            LOG_WARNING(
+                "[hair-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
         }
-
-        const int32_t dx = s->pos.x - ps->pos.x;
-        const int32_t dz = s->pos.z - ps->pos.z;
-        const int32_t distance = Math_Sqrt(SQUARE(dx) + SQUARE(dz));
-        ps->rot.y = Math_Atan(dz, dx);
-        ps->rot.x = -Math_Atan(distance, s->pos.y - ps->pos.y);
-
-        Matrix_PushUnit();
-        Matrix_TranslateSet32(ps->pos);
-        Matrix_RotY(ps->rot.y);
-        Matrix_RotX(ps->rot.x);
-
-        const ANIM_BONE *const bone = &bones[M_BONE_IDX(i)];
-        Matrix_TranslateRel32(bone->pos);
-
-        s->pos.x = g_MatrixPtr->_03 >> W2V_SHIFT;
-        s->pos.y = g_MatrixPtr->_13 >> W2V_SHIFT;
-        s->pos.z = g_MatrixPtr->_23 >> W2V_SHIFT;
-
-        s->vel.x = s->pos.x - old_pos.x;
-        s->vel.y = s->pos.y - old_pos.y;
-        s->vel.z = s->pos.z - old_pos.z;
-
-        Matrix_Pop();
+    #endif
+        return;
     }
+#endif
+    M_StepC(braid_idx, bones, lara_info, room_num, water_height, height,
+            smoke_wind, hair_wind_z);
 }
 
 static void M_EnsureScratch(const int32_t vertex_count)

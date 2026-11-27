@@ -10,9 +10,6 @@
 #define VECTOR_GROWTH_RATE 2
 #define P(obj) ((*obj->priv))
 
-struct VECTOR_PRIV {
-    char *items;
-};
 
 static void M_EnsureCapacity(VECTOR *const vector, const int32_t n)
 {
@@ -101,11 +98,12 @@ bool Vector_Contains(const VECTOR *const vector, const void *const item)
     return Vector_IndexOf(vector, item) != -1;
 }
 
-void *Vector_Get(const VECTOR *const vector, const int32_t index)
+void Vector_FailIndex(const VECTOR *const vector, const int32_t index)
 {
-    ASSERT(index >= 0 && index < vector->count);
-    char *const items = P(vector).items;
-    return (void *)(items + index * vector->item_size);
+    LOG_ERROR(
+        "Vector index %d outside 0..%d", (int)index, (int)vector->count - 1);
+    ASSERT_FAIL();
+    __builtin_trap();
 }
 
 void *Vector_GetData(const VECTOR *const vector)

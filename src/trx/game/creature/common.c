@@ -22,6 +22,14 @@
 #include <trx/game/spawn.h>
 #include <trx/version.h>
 
+#if defined(__DREAMCAST__)
+    #include <platform/dreamcast/dc_probe.h>
+#else
+    #define DC_PROBE(i, stmt) stmt
+#endif
+
+#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 // clang-format off
@@ -523,7 +531,7 @@ static void M_AIAngles(
     M_AIAnglesC(info, x, z, y, rot_y, enemy_rot_y);
 }
 
-void Creature_AIInfo(ITEM *const item, AI_INFO *const info)
+static void M_AIInfoC(ITEM *const item, AI_INFO *const info)
 {
     CREATURE *const creature = item->creature_data;
     if (creature == nullptr) {
@@ -615,6 +623,171 @@ void Creature_AIInfo(ITEM *const item, AI_INFO *const info)
     }
 }
 
+#if defined(__DREAMCAST__)
+// In assembly (game_sh4.S, dc_ai_info): the layout of its block.
+typedef struct {
+    ITEM *item;
+    ITEM *enemy;
+    AI_INFO *info;
+    const int16_t *zone;
+    const ROOM *rooms;
+    const BOX_INFO *boxes;
+    int32_t box_count;
+    int32_t pivot_length;
+    int32_t crouching;
+    int32_t tr1;
+    const LOT_INFO *lot;
+    const ITEM *creature_enemy;
+    int32_t fixed_zone;
+    int32_t enemy_x;
+    int32_t enemy_z;
+    int32_t max_dist;
+    int32_t max_dist_sq;
+    int32_t far_is_none;
+    int32_t bite;
+    int32_t (*sin)(int32_t angle);
+} M_AI_BLOCK;
+_Static_assert(sizeof(M_AI_BLOCK) == 80, "dc_ai_info's block");
+extern int32_t dc_sin(int32_t angle);
+extern int32_t dc_sin_coarse(int32_t angle);
+_Static_assert(offsetof(ITEM, room_num) == 32, "dc_ai_info: ITEM");
+_Static_assert(offsetof(ITEM, hit_points) == 42, "dc_ai_info: ITEM");
+_Static_assert(offsetof(ITEM, box_num) == 46, "dc_ai_info: ITEM");
+_Static_assert(offsetof(ITEM, pos) == 100, "dc_ai_info: ITEM");
+_Static_assert(offsetof(ITEM, rot) == 112, "dc_ai_info: ITEM");
+_Static_assert(sizeof(ROOM) == 192, "dc_ai_info: ROOM");
+_Static_assert(offsetof(ROOM, sectors) == 44, "dc_ai_info: ROOM");
+_Static_assert(offsetof(ROOM, pos) == 56, "dc_ai_info: ROOM");
+_Static_assert(offsetof(ROOM, size) == 76, "dc_ai_info: ROOM");
+_Static_assert(sizeof(SECTOR) == 48, "dc_ai_info: SECTOR");
+_Static_assert(offsetof(SECTOR, box) == 34, "dc_ai_info: SECTOR");
+_Static_assert(sizeof(BOX_INFO) == 24, "dc_ai_info: BOX_INFO");
+_Static_assert(offsetof(BOX_INFO, overlap_index) == 20, "dc_ai_info: BOX_INFO");
+_Static_assert(sizeof(BOX_NODE) == 8, "dc_ai_info: BOX_NODE");
+_Static_assert(offsetof(BOX_NODE, search_num) == 2, "dc_ai_info: BOX_NODE");
+_Static_assert(offsetof(LOT_INFO, setup.block_mask) == 8, "dc_ai_info: LOT");
+_Static_assert(offsetof(LOT_INFO, node) == 20, "dc_ai_info: LOT");
+_Static_assert(offsetof(LOT_INFO, search_num) == 28, "dc_ai_info: LOT");
+_Static_assert(sizeof(AI_INFO) == 16, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, enemy_zone_num) == 2, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, distance) == 4, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, ahead) == 8, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, bite) == 9, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, angle) == 10, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, x_angle) == 12, "dc_ai_info: AI_INFO");
+_Static_assert(offsetof(AI_INFO, enemy_facing) == 14, "dc_ai_info: AI_INFO");
+extern uint32_t g_DC_AsmOff3;
+extern void dc_ai_info(const M_AI_BLOCK *b);
+#endif
+
+static void M_AIInfoImpl(ITEM *const item, AI_INFO *const info)
+{
+#if defined(__DREAMCAST__)
+    // TR1 and TR2 in assembly, with the routines the C would take (the fine
+    // sine table, dc_ai_angles); ASMOFF3 bit 32 turns it off.
+    CREATURE *const creature = item->creature_data;
+    const bool coarse = Math_IsCoarseTrig();
+    if (creature != nullptr && g_TRVersion <= 3 && (g_DC_AsmOff3 & 32) == 0
+        && (g_DC_AsmOff2 & (262144 | (coarse ? 8192 : 32))) == 0) {
+        ITEM *enemy = g_TRVersion >= 3 ? creature->enemy
+                                       : M_ChooseEnemy(item, nullptr);
+        if (enemy == nullptr) {
+            enemy = Lara_GetItem();
+            creature->enemy = enemy;
+        }
+        const ITEM *const lara_item = Lara_GetItem();
+        XYZ_32 enemy_pos = enemy->pos;
+        if (g_TRVersion >= 3) {
+            const int16_t enemy_angle = enemy == lara_item
+                ? Lara_GetLaraInfo()->move_angle
+                : enemy->rot.y;
+            enemy_pos =
+                XYZ_32_OffsetYaw(enemy_pos, enemy_angle, 14 * enemy->speed);
+        }
+        const M_AI_BLOCK b = {
+            .item = item,
+            .enemy = enemy,
+            .info = info,
+            .zone = Box_GetLotZone(&creature->lot),
+            .rooms = Room_Get(0),
+            .boxes = Box_GetBox(0),
+            .box_count = Box_GetCount(),
+            .pivot_length = Object_Get(item->object_id)->pivot_length,
+            .crouching =
+                enemy == Lara_GetItem() && Lara_HasState(m_CrouchShiftStates),
+            .tr1 = g_TRVersion == 1,
+            .lot = &creature->lot,
+            .creature_enemy = creature->enemy,
+            .fixed_zone = g_TRVersion == 3 && creature->lot.setup.fly != 0
+                ? BOX_FIXED_FLY_ZONE
+                : -1,
+            .enemy_x = enemy_pos.x,
+            .enemy_z = enemy_pos.z,
+            .max_dist = M_MAX_DISTANCE,
+            .max_dist_sq = SQUARE(M_MAX_DISTANCE),
+            .far_is_none = g_TRVersion >= 3,
+            .bite = M_BITE_DISTANCE,
+            .sin = coarse ? dc_sin_coarse : dc_sin,
+        };
+    #if defined(DC_EMIT_VERIFY)
+        const int16_t box_a = item->box_num;
+        const int16_t box_b = enemy->box_num;
+        dc_ai_info(&b);
+        AI_INFO got = *info;
+        if (g_TRVersion == 3 && !creature->hurt_by_lara
+            && creature->enemy == lara_item && !Creature_IsHostile(item)
+            && Creature_IsAlly(item)) {
+            got.ahead = false;
+            got.bite = false;
+            got.distance = INT32_MAX;
+        }
+        const int16_t got_a = item->box_num;
+        const int16_t got_b = enemy->box_num;
+        item->box_num = box_a;
+        enemy->box_num = box_b;
+        M_AIInfoC(item, info);
+        static uint32_t runs;
+        static uint32_t bad;
+        if (memcmp(&got, info, sizeof(AI_INFO)) != 0
+            || got_a != item->box_num || got_b != enemy->box_num) {
+            if (bad++ < 6) {
+                LOG_WARNING(
+                    "[aiinfo-verify] MISMATCH zone %d/%d ez %d/%d d %d/%d "
+                    "a %d/%d x %d/%d f %d/%d ah %d/%d bi %d/%d",
+                    got.zone_num, info->zone_num, got.enemy_zone_num,
+                    info->enemy_zone_num, got.distance, info->distance,
+                    got.angle, info->angle, got.x_angle, info->x_angle,
+                    got.enemy_facing, info->enemy_facing, got.ahead,
+                    info->ahead, got.bite, info->bite);
+            }
+        }
+        if (runs++ == 0 || runs % 2000 == 0) {
+            LOG_WARNING(
+                "[aiinfo-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+    #else
+        dc_ai_info(&b);
+    #endif
+        if (g_TRVersion == 3 && !creature->hurt_by_lara
+            && creature->enemy == lara_item && !Creature_IsHostile(item)
+            && Creature_IsAlly(item)) {
+            creature->enemy = nullptr;
+            info->ahead = false;
+            info->bite = false;
+            info->distance = INT32_MAX;
+        }
+        return;
+    }
+#endif
+    M_AIInfoC(item, info);
+}
+
+void Creature_AIInfo(ITEM *const item, AI_INFO *const info)
+{
+    DC_PROBE(DC_PROBE_N_AIINFO, M_AIInfoImpl(item, info));
+}
+
 bool Creature_EnsureHabitat(
     const int16_t item_num, int32_t *const wh, const HYBRID_INFO *const info)
 {
@@ -634,11 +807,153 @@ bool Creature_EnsureHabitat(
         : M_SwitchToLand(item_num, water_height, info);
 }
 
-void Creature_Mood(
+static void M_MoodImpl(
     const ITEM *const item, const AI_INFO *const info, const bool violent)
 {
     Creature_UpdateMood(item, info, violent);
     Creature_ApplyMood(item, info, violent);
+}
+
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_creature_mood): the layout of its block.
+typedef struct {
+    const ITEM *item;
+    const AI_INFO *info;
+    CREATURE *creature;
+    const ITEM *lara;
+    int32_t violent;
+    int32_t smartness;
+    int32_t may_skip;
+    int32_t tr;
+} M_MOOD_BLOCK;
+_Static_assert(sizeof(M_MOOD_BLOCK) == 32, "dc_creature_mood's block");
+_Static_assert(offsetof(CREATURE, alerted) == 12, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, monkey_ahead) == 16, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, jump_ahead) == 17, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, mood) == 28, "dc_creature_mood");
+_Static_assert(sizeof(MOOD_TYPE) == 4, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, lot) == 32, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, target) == 80, "dc_creature_mood");
+_Static_assert(offsetof(CREATURE, enemy) == 92, "dc_creature_mood");
+_Static_assert(offsetof(LOT_INFO, zone_count) == 30, "dc_creature_mood");
+_Static_assert(offsetof(LOT_INFO, target_box) == 32, "dc_creature_mood");
+_Static_assert(offsetof(LOT_INFO, required_box) == 34, "dc_creature_mood");
+_Static_assert(offsetof(BOX_NODE, box_num) == 6, "dc_creature_mood");
+_Static_assert(offsetof(ITEM, frame_num) == 28, "dc_creature_mood");
+_Static_assert(offsetof(ITEM, hit_status) == 126, "dc_creature_mood");
+extern void dc_creature_mood(const M_MOOD_BLOCK *b);
+
+// The attack's target for dc_creature_mood (Creature_ApplyMood's own steps).
+void DC_Creature_MoodAttack(
+    const ITEM *item, LOT_INFO *lot, const ITEM *enemy);
+void DC_Creature_MoodAttack(
+    const ITEM *const item, LOT_INFO *const lot, const ITEM *const enemy)
+{
+    (void)item;
+    lot->target = Creature_GetAITargetPos(enemy);
+    lot->required_box = enemy->box_num;
+    if (lot->setup.fly != 0
+        && Lara_GetLaraInfo()->water_status == LWS_ABOVE_WATER) {
+        lot->target.y += Item_GetBestFrame(enemy)->bounds.min.y;
+    }
+}
+
+// TR1 and TR2 in assembly; ASMOFF3 bit 512 turns it off.
+static bool M_MoodAsm(
+    const ITEM *const item, const AI_INFO *const info, const bool violent)
+{
+    CREATURE *const creature = item->creature_data;
+    if (creature == nullptr || g_TRVersion > 3 || (g_DC_AsmOff3 & 512) != 0) {
+        return false;
+    }
+    const M_MOOD_BLOCK b = {
+        .item = item,
+        .info = info,
+        .creature = creature,
+        .lara = Lara_GetItem(),
+        .violent = violent,
+        .smartness = Object_Get(item->object_id)->smartness,
+        .may_skip = !M_InDemo()
+            && ((item->frame_num + Item_GetIndex(item)) & 1) != 0,
+        .tr = g_TRVersion,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    // The route search Box_CalculateTarget runs changes the nodes and the
+    // tick's budget too: both put back before the C's run.
+    CREATURE before;
+    CREATURE got;
+    static BOX_NODE *nodes_before = nullptr;
+    static int32_t nodes_cap = 0;
+    const int32_t n_nodes = Box_GetCount();
+    if (n_nodes > nodes_cap) {
+        free(nodes_before);
+        nodes_before = malloc(sizeof(BOX_NODE) * (size_t)n_nodes);
+        nodes_cap = nodes_before != nullptr ? n_nodes : 0;
+    }
+    memcpy(nodes_before, creature->lot.node, sizeof(BOX_NODE) * (size_t)n_nodes);
+    const int32_t budget_before = *Box_DC_TickExpansions();
+    memcpy(&before, creature, sizeof(CREATURE));
+    const int32_t seed_before = (int32_t)*Random_GetControlState();
+    dc_creature_mood(&b);
+    memcpy(&got, creature, sizeof(CREATURE));
+    const uint32_t seed_got = *Random_GetControlState();
+    memcpy(creature, &before, sizeof(CREATURE));
+    memcpy(creature->lot.node, nodes_before, sizeof(BOX_NODE) * (size_t)n_nodes);
+    *Box_DC_TickExpansions() = budget_before;
+    *Random_GetControlState() = (uint32_t)seed_before;
+    M_MoodImpl(item, info, violent);
+    static uint32_t runs;
+    static uint32_t bad;
+    if (memcmp(&got, creature, sizeof(CREATURE)) != 0
+        || seed_got != *Random_GetControlState()) {
+        if (bad++ < 6) {
+            int32_t at = -1;
+            for (int32_t i = 0; i < (int32_t)sizeof(CREATURE) && at < 0; i++) {
+                if (((const uint8_t *)&got)[i] != ((const uint8_t *)creature)[i]) {
+                    at = i;
+                }
+            }
+            LOG_WARNING(
+                "[mood-verify] byte %d: asm %02x C %02x; lot.target %d %d %d / "
+                "%d %d %d; target %d %d %d / %d %d %d",
+                (int)at, at >= 0 ? ((const uint8_t *)&got)[at] : 0,
+                at >= 0 ? ((const uint8_t *)creature)[at] : 0,
+                got.lot.target.x, got.lot.target.y, got.lot.target.z,
+                creature->lot.target.x, creature->lot.target.y,
+                creature->lot.target.z, got.target.x, got.target.y,
+                got.target.z, creature->target.x, creature->target.y,
+                creature->target.z);
+            LOG_WARNING(
+                "[mood-verify] MISMATCH mood %d/%d target %d/%d req %d/%d "
+                "seed %s",
+                (int)got.mood, (int)creature->mood, got.lot.target_box,
+                creature->lot.target_box, got.lot.required_box,
+                creature->lot.required_box,
+                seed_got == *Random_GetControlState() ? "same" : "differs");
+        }
+    }
+    if (runs++ == 0 || runs % 1000 == 0) {
+        LOG_WARNING(
+            "[mood-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    #else
+    dc_creature_mood(&b);
+    #endif
+    return true;
+}
+#endif
+
+void Creature_Mood(
+    const ITEM *const item, const AI_INFO *const info, const bool violent)
+{
+#if defined(__DREAMCAST__)
+    bool done = false;
+    DC_PROBE(DC_PROBE_N_MOOD, done = M_MoodAsm(item, info, violent));
+    if (done) {
+        return;
+    }
+#endif
+    DC_PROBE(DC_PROBE_N_MOOD, M_MoodImpl(item, info, violent));
 }
 
 void Creature_UpdateMood(
@@ -1292,7 +1607,7 @@ void Creature_Collision(
     }
 }
 
-bool Creature_Animate(
+static bool M_AnimateImpl(
     const int16_t item_num, const int16_t angle, const int16_t tilt)
 {
     ITEM *const item = Item_Get(item_num);
@@ -1656,6 +1971,181 @@ bool Creature_Animate(
     Item_UpdateRoom(item_num, room_num);
     return true;
 }
+
+#if defined(__DREAMCAST__)
+// What dc_creature_animate (creature_sh4.S) calls that takes a structure by
+// value or is static here: with plain numbers.
+SECTOR *DC_Cr_Sector(int32_t x, int32_t y, int32_t z, int16_t *room_num);
+SECTOR *DC_Cr_Sector(
+    const int32_t x, const int32_t y, const int32_t z, int16_t *const room_num)
+{
+    return Room_GetSector((XYZ_32) { x, y, z }, room_num);
+}
+
+int32_t DC_Cr_Height(const SECTOR *sector, int32_t x, int32_t y, int32_t z);
+int32_t DC_Cr_Height(
+    const SECTOR *const sector, const int32_t x, const int32_t y,
+    const int32_t z)
+{
+    return Room_GetHeight(sector, (XYZ_32) { x, y, z });
+}
+
+int32_t DC_Cr_Ceiling(const SECTOR *sector, int32_t x, int32_t y, int32_t z);
+int32_t DC_Cr_Ceiling(
+    const SECTOR *const sector, const int32_t x, const int32_t y,
+    const int32_t z)
+{
+    return Room_GetCeiling(sector, (XYZ_32) { x, y, z });
+}
+
+void DC_Cr_Die(int16_t item_num);
+void DC_Cr_Die(const int16_t item_num)
+{
+    Creature_Die(item_num, (CREATURE_DIE_ARGS) {});
+}
+
+const ITEM *DC_Cr_Overlap(int16_t item_num);
+const ITEM *DC_Cr_Overlap(const int16_t item_num)
+{
+    return M_GetBaddieOverlap(item_num);
+}
+
+bool DC_Cr_Drowned(const ITEM *item, const BOUNDS_16 *bounds, int16_t room);
+bool DC_Cr_Drowned(
+    const ITEM *const item, const BOUNDS_16 *const bounds, const int16_t room)
+{
+    return M_TestDrowned(item, bounds, room);
+}
+
+bool DC_Cr_WaterBelow(const ITEM *item, int32_t y);
+bool DC_Cr_WaterBelow(const ITEM *const item, const int32_t y)
+{
+    return M_TestWaterBelow(item, y);
+}
+
+// s: y, the box's height, the next box's height, the room, the LOT.
+bool DC_Cr_BadFloor(const int32_t *s, int32_t x, int32_t z);
+bool DC_Cr_BadFloor(const int32_t *const s, const int32_t x, const int32_t z)
+{
+    return Box_BadFloor(
+        x, s[0], z, s[1], s[2], (int16_t)s[3], (LOT_INFO *)(uintptr_t)s[4]);
+}
+
+// In assembly (creature_sh4.S, dc_creature_animate): the layout of its block.
+typedef struct {
+    ITEM *item;
+    int32_t item_num;
+    int32_t angle;
+    int32_t tilt;
+    const CREATURE *creature;
+    const int16_t *zone;
+    const BOX_INFO *boxes;
+    int32_t tr;
+    int32_t radius;
+    int32_t water;
+    int32_t min_y_mode;
+    int32_t no_overlap;
+    int32_t walk_768;
+} M_ANIM_BLOCK;
+_Static_assert(sizeof(M_ANIM_BLOCK) == 52, "dc_creature_animate's block");
+_Static_assert(offsetof(ITEM, floor) == 0, "dc_creature_animate");
+_Static_assert(offsetof(ITEM, speed) == 38, "dc_creature_animate");
+_Static_assert(offsetof(ITEM, is_finished) == 123, "dc_creature_animate");
+_Static_assert(offsetof(BOX_INFO, height) == 16, "dc_creature_animate");
+_Static_assert(offsetof(BOX_NODE, exit_box) == 0, "dc_creature_animate");
+_Static_assert(offsetof(LOT_INFO, setup.step) == 0, "dc_creature_animate");
+_Static_assert(offsetof(LOT_INFO, setup.drop) == 2, "dc_creature_animate");
+_Static_assert(offsetof(LOT_INFO, setup.fly) == 4, "dc_creature_animate");
+_Static_assert(offsetof(LOT_INFO, is_jumping) == 16, "dc_creature_animate");
+_Static_assert(offsetof(LOT_INFO, is_monkeying) == 17, "dc_creature_animate");
+_Static_assert(offsetof(BOUNDS_16, min.y) == 2, "dc_creature_animate");
+extern int32_t dc_creature_animate(const M_ANIM_BLOCK *b);
+
+// TR1 and TR2 in assembly; ASMOFF3 bit 1024 turns it off.
+static bool M_AnimateAsm(
+    const int16_t item_num, const int16_t angle, const int16_t tilt,
+    bool *const result)
+{
+    ITEM *const item = Item_Get(item_num);
+    const CREATURE *const creature = item->creature_data;
+    if (creature == nullptr || g_TRVersion > 3 || (g_DC_AsmOff3 & 1024) != 0) {
+        return false;
+    }
+    const OBJECT_ID id = item->object_id;
+    const M_ANIM_BLOCK b = {
+        .item = item,
+        .item_num = item_num,
+        .angle = angle,
+        .tilt = tilt,
+        .creature = creature,
+        .zone = Box_GetLotZone(&creature->lot),
+        .boxes = Box_GetBox(0),
+        .tr = g_TRVersion,
+        .radius = Object_Get(id)->radius,
+        .water = ObjectFamily_Has(id, OBJ_FAMILY_WATER),
+        .min_y_mode = id == O_ALLIGATOR ? 1
+            : id == O_SHARK || id == O_ORCA || id == O_DOLPHIN ? 2
+                                                               : 0,
+        .no_overlap = g_TRVersion >= 3 && (id == O_TREX || id == O_TREX_ALPHA),
+        .walk_768 = id == O_TREX || id == O_TREX_ALPHA || id == O_SHIVA
+            || id == O_CLAW_MUTANT,
+    };
+    *result = dc_creature_animate(&b) != 0;
+    return true;
+}
+#endif
+
+#if defined(__DREAMCAST__) && defined(DC_EMIT_VERIFY)
+static void M_AnimateHash(int16_t item_num, bool result);
+static bool M_AnimateOne(int16_t item_num, int16_t angle, int16_t tilt);
+bool Creature_Animate(
+    const int16_t item_num, const int16_t angle, const int16_t tilt)
+{
+    const bool result = M_AnimateOne(item_num, angle, tilt);
+    M_AnimateHash(item_num, result);
+    return result;
+}
+static bool M_AnimateOne(
+    const int16_t item_num, const int16_t angle, const int16_t tilt)
+#else
+bool Creature_Animate(
+    const int16_t item_num, const int16_t angle, const int16_t tilt)
+#endif
+{
+    bool result;
+#if defined(__DREAMCAST__)
+    bool done = false;
+    DC_PROBE(
+        DC_PROBE_N_ANIM, done = M_AnimateAsm(item_num, angle, tilt, &result));
+    if (done) {
+        return result;
+    }
+#endif
+    DC_PROBE(DC_PROBE_N_ANIM, result = M_AnimateImpl(item_num, angle, tilt));
+    return result;
+}
+
+#if defined(__DREAMCAST__) && defined(DC_EMIT_VERIFY)
+// What each Creature_Animate left, as a running hash: a demo run with the
+// assembly and again without it (ASMOFF3 bit 1024) logs the same values.
+static void M_AnimateHash(const int16_t item_num, const bool result)
+{
+    static uint32_t hash = 2166136261u;
+    static uint32_t runs = 0;
+    const ITEM *const item = Item_Get(item_num);
+    const int32_t v[] = {
+        result, item->pos.x, item->pos.y, item->pos.z, item->rot.x,
+        item->rot.y, item->rot.z, item->floor, item->room_num,
+        item->hit_points, item->frame_num, item->current_anim_state,
+    };
+    for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
+        hash = (hash ^ (uint32_t)v[i]) * 16777619u;
+    }
+    if (++runs % 100 == 0) {
+        LOG_WARNING("[anim-hash] %u runs: %08x", (unsigned)runs, (unsigned)hash);
+    }
+}
+#endif
 
 void Creature_SpecialKill(
     ITEM *const item, const int32_t kill_anim, const int32_t kill_state,

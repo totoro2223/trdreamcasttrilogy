@@ -481,6 +481,11 @@ void Math_SetCoarseTrig(const bool enable)
     m_UseCoarseTable = enable;
 }
 
+bool Math_IsCoarseTrig(void)
+{
+    return m_UseCoarseTable;
+}
+
 int32_t Math_Sin(int32_t angle)
 {
 #if defined(__DREAMCAST__)
