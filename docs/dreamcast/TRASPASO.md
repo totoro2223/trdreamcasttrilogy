@@ -82,6 +82,14 @@ Desde PowerShell, en la raíz del repo:
   `DC_PROFILE=1` (-prof), `DC_CENSUS=1` (-census), `DC_LUA=1` (-lua, el juego
   con scripts), `DC_ISO_DMA=1` (-dma), `DC_BOXES=1` (-boxes), `DC_MAGENTA=1`
   (-magenta), `DC_STRICT=1` (-strict, con `DC_TEST_HANG=N`).
+- **Flycast con fallos de consola** (`D:\FlycastAlign`, compilado de
+  `D:\flycast-src` con `core/hw/sh4/sh4_mem.cpp` y `interpr/sh4_opcodes.cpp`
+  tocados): con `$env:FLYCAST_ALIGN='1'`, `$env:TRX_FLYCAST='D:\FlycastAlign\flycast.exe'`
+  y `-FlycastArgs '-config config:FullMMU=yes -config config:Dynarec.Enabled=no'`,
+  un acceso desalineado (8 bytes en `fmov.d`) es una excepción como en la
+  consola y `movca.l` deja basura en el resto de la línea. Va con intérprete:
+  ~10 veces más lento. `TRX_DC_TOUR=n` (make_disc.sh) lleva a Lara al
+  siguiente enemigo cada n frames, lo despierta y no la deja morir.
 - **Discos para GDEMU**: `build.sh release` (`build/dc-release`, sin
   watchdog ni las líneas `[frame]`/`[probe]`/`[bins]` por el puerto serie, que
   en consola paran el juego) y `make_disc.sh build/dc-release …` sin variables

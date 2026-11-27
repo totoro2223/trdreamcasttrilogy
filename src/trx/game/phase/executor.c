@@ -22,6 +22,9 @@
 #include <trx/game/gun/misc.h>
 #include <trx/game/gun/smoke.h>
 #include <trx/game/inventory.h>
+#include <trx/game/items.h>
+#include <trx/game/lara/const.h>
+#include <trx/game/objects/common.h>
 #include <trx/game/lara/common.h>
 #include <trx/game/lua/common.h>
 #include <trx/game/lua/events.h>
@@ -186,6 +189,8 @@ static int32_t exit_frames = 0;
 static int32_t complete_frames = 0;
 static int32_t give_frames = 0;
 static int32_t fire_frames = 0;
+static int32_t tour_frames = 0;
+static int32_t tour_next = 0;
 static int32_t frames = 0;
 
 // Feeds the time a frame took to the mode, which drops from 60 to 30 fps in
@@ -207,6 +212,8 @@ static void M_ReportWork(const Uint64 start)
         complete_frames = 0;
         give_frames = 0;
         fire_frames = 0;
+        tour_frames = 0;
+        tour_next = 0;
         frames = 0;
     }
     // A test that visits the levels in turn, from the one the disc starts in.
@@ -280,6 +287,27 @@ static void M_ReportWork(const Uint64 start)
     if (fire_every > 0 && ++fire_frames % fire_every == 0) {
         Gun_Smoke_OnFire(LGT_PISTOLS, true);
         Gun_Smoke_OnFire(LGT_PISTOLS, false);
+    }
+    // Lara stands where the next living enemy is, wakes it, and stays alive.
+    ITEM *const tour_lara = g_DC_TestTour > 0 ? Lara_GetItem() : nullptr;
+    if (tour_lara != nullptr) {
+        tour_lara->hit_points = LARA_MAX_HITPOINTS;
+        const int32_t count =
+            ++tour_frames % g_DC_TestTour == 0 ? Item_GetLevelCount() : 0;
+        for (int32_t k = 1; k <= count; k++) {
+            const int16_t num = (int16_t)((tour_next + k) % count);
+            const ITEM *const item = Item_Get(num);
+            if (item == tour_lara || item->hit_points <= 0
+                || !Object_Get(item->object_id)->intelligent) {
+                continue;
+            }
+            tour_next = num;
+            Item_Activate(num, true);
+            tour_lara->pos = item->pos;
+            Item_UpdateRoom(Lara_GetLaraInfo()->item_num, item->room_num);
+            LOG_INFO("test: tour at item %d (object %d)", num, item->object_id);
+            break;
+        }
     }
     if (g_DC_TestSwitchMode >= 0 && ++frames == g_DC_TestSwitchFrame) {
         LOG_INFO("test: the mode is now %d", (int)g_DC_TestSwitchMode);

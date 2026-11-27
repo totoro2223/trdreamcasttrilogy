@@ -77,6 +77,9 @@ extern int32_t g_DC_TestLevelLast;
 extern int32_t g_DC_TestLevelFrames;
 // A test disc fires the pistols' smoke every this many frames (0: never).
 extern int32_t g_DC_TestFire;
+// A test disc takes Lara to the next enemy every this many frames, wakes it
+// and keeps her alive (0: never).
+extern int32_t g_DC_TestTour;
 // A test disc leaves the probe timers off the screen (they cost UI time).
 extern int32_t g_DC_TestNoHud;
 // A test disc shows the frame rate counter (TRX_DC_SHOWFPS).

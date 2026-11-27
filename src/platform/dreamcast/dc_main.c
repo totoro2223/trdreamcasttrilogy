@@ -419,6 +419,16 @@ static int M_RunGame(int argc, char *argv[])
         }
         fclose(fire);
     }
+    // A test disc that takes Lara from enemy to enemy (make_disc.sh's
+    // TRX_DC_TOUR): every how many frames.
+    FILE *const tour = M_Open("TOUR.TXT");
+    if (tour != nullptr) {
+        int number = 0;
+        if (fscanf(tour, "%d", &number) == 1) {
+            g_DC_TestTour = number;
+        }
+        fclose(tour);
+    }
     FILE *const debugkeys = M_Open("DEBUGKEYS.TXT");
     if (debugkeys != nullptr) {
         g_DC_TestDebugKeys = 1;

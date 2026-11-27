@@ -91,6 +91,7 @@ int32_t g_DC_TestLevelStart = 0;
 int32_t g_DC_TestLevelLast = -1;
 int32_t g_DC_TestLevelFrames = 0;
 int32_t g_DC_TestFire = 0;
+int32_t g_DC_TestTour = 0;
 int32_t g_DC_TestNoHud = 0;
 int32_t g_DC_TestShowFps = 0;
 int32_t g_DC_TestDebugKeys = 0;

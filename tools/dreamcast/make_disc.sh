@@ -124,6 +124,10 @@ if [ -n "${TRX_DC_FIRE:-}" ]; then
   # The pistols smoke every n frames (a test of the smoke's cost).
   echo "$TRX_DC_FIRE" > "$STAGE/FIRE.TXT"
 fi
+if [ -n "${TRX_DC_TOUR:-}" ]; then
+  # Lara goes to the next enemy every n frames, wakes it and cannot die.
+  echo "$TRX_DC_TOUR" > "$STAGE/TOUR.TXT"
+fi
 if [ -n "$START_LEVEL" ]; then
   echo "$START_LEVEL" > "$STAGE/START.TXT"
   echo "starts in level $START_LEVEL"
@@ -235,7 +239,7 @@ fi
 # load prints ~50 KB, 4 s on the console, cable or not), so only a test disc
 # (any test hook, or TRX_DC_LOG=1) keeps it (dc_main.c, LOG.TXT).
 rm -f "$STAGE/LOG.TXT"
-for hook in DEMO BENCH SAVE EXIT COMPLETE GIVE FIRE START LEVELS SWITCH RESETOPT AI FPS WIDE CUTSCENE SNOW FOG; do
+for hook in DEMO BENCH SAVE EXIT COMPLETE GIVE FIRE TOUR START LEVELS SWITCH RESETOPT AI FPS WIDE CUTSCENE SNOW FOG; do
   [ -f "$STAGE/$hook.TXT" ] && echo 1 > "$STAGE/LOG.TXT"
 done
 [ -n "${TRX_DC_LOG:-}" ] && echo 1 > "$STAGE/LOG.TXT"
