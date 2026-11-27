@@ -127,7 +127,7 @@ Ganchos de prueba (todos en `tools/dreamcast/make_disc.sh`): `TRX_DC_GIVE`, `FIR
 el nivel de inicio. Las pruebas van siempre con Flycast oculto y sin sonido, salvo que se pida
 verlas.
 
-| `dc_creature_mood`, `dc_creature_animate`, `dc_target_box` (`creature_sh4.S`); `dc_hair_step` (`hair_sh4.S`); `dc_sil_faces` (`soft_sh4.S`); `dc_nat_water`, `dc_tr3_light`, `dc_fill_matrix`, `dc_obj_key` (`inst_sh4.S`) | Humor y movimiento de enemigos, caja objetivo, pelo de Lara, siluetas de la sombra suave, agua de TR3 en lotes, luz de objetos TR3, matriz de instancia, clave de la caché de colores | `[mood-verify]`, `[aiinfo-verify]`, hash de demos de Animate, `[tbox-verify]`, `[hair-verify]`, `[silfaces-verify]`, `[tr3light-verify]`, `[fillmat-verify]`, `[objkey-verify]`: 0 distintas; `[natwater-verify]` sin cobertura | pelo 911 → 113 µs |
+| `dc_creature_mood`, `dc_creature_animate`, `dc_target_box` (`creature_sh4.S`); `dc_hair_step` (`hair_sh4.S`); `dc_sil_faces` (`soft_sh4.S`); `dc_nat_water`, `dc_tr3_light`, `dc_fill_matrix`, `dc_obj_key` (`inst_sh4.S`) | Humor y movimiento de enemigos, caja objetivo, pelo de Lara, siluetas de la sombra suave, agua de TR3 en lotes, luz de objetos TR3, matriz de instancia, clave de la caché de colores | `[mood-verify]`, `[aiinfo-verify]`, hash de demos de Animate, `[tbox-verify]`, `[hair-verify]`, `[silfaces-verify]`, `[tr3light-verify]`, `[fillmat-verify]`, `[objkey-verify]`, `[natwater-verify]`: 0 distintas | pelo 911 → 113 µs |
 Reglas del SH-4 que costaron tiempo:
 - Un inmediato (`add #n`, `mov #n`) va de -128 a 127: `add #128,r15` se ensambla como -128.
 - `mov.l @(disp,Rn)` llega a 60 bytes; `mov.b`/`mov.w @(disp,Rn)` solo con R0 y desplazamientos
