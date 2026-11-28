@@ -2049,6 +2049,65 @@ bool Matrix_DC_WalkJoint(
     #endif
     return true;
 }
+
+bool Matrix_DC_WalkJointReady(uint32_t *const block)
+{
+    const bool coarse = Math_IsCoarseTrig();
+    if (!g_MatrixWorldOnly || (g_DC_AsmOff3 & 8) != 0
+        || (g_DC_AsmOff & (67108864u | 134217728u | 1073741824u)) != 0
+        || (g_DC_AsmOff2 & (coarse ? 8192 : 32)) != 0) {
+        return false;
+    }
+    M_WALK_JOINT *const c = (M_WALK_JOINT *)block;
+    *c = (M_WALK_JOINT) {
+        .view = &g_MatrixPtr,
+        .world = &g_WMatrixPtr,
+        .view_far = &m_IMMatrixPtr,
+        .world_far = &m_WIMMatrixPtr,
+        .view_last = &m_MatrixStack[MAX_MATRICES - 1],
+        .world_last = &m_WMatrixStack[MAX_MATRICES - 1],
+        .sin = coarse ? dc_sin_coarse : dc_sin,
+    };
+    return true;
+}
+
+static struct {
+    MATRIX stacks[2][MAX_MATRICES];
+    MATRIX far[2][MAX_NESTED_MATRICES];
+    MATRIX *ptrs[4];
+} m_DCState;
+
+void Matrix_DC_SaveState(void)
+{
+    memcpy(m_DCState.stacks[0], m_MatrixStack, sizeof(m_MatrixStack));
+    memcpy(m_DCState.stacks[1], m_WMatrixStack, sizeof(m_WMatrixStack));
+    memcpy(m_DCState.far[0], m_IMMatrixStack, sizeof(m_IMMatrixStack));
+    memcpy(m_DCState.far[1], m_WIMMatrixStack, sizeof(m_WIMMatrixStack));
+    m_DCState.ptrs[0] = g_MatrixPtr;
+    m_DCState.ptrs[1] = g_WMatrixPtr;
+    m_DCState.ptrs[2] = m_IMMatrixPtr;
+    m_DCState.ptrs[3] = m_WIMMatrixPtr;
+}
+
+void Matrix_DC_LoadState(void)
+{
+    memcpy(m_MatrixStack, m_DCState.stacks[0], sizeof(m_MatrixStack));
+    memcpy(m_WMatrixStack, m_DCState.stacks[1], sizeof(m_WMatrixStack));
+    memcpy(m_IMMatrixStack, m_DCState.far[0], sizeof(m_IMMatrixStack));
+    memcpy(m_WIMMatrixStack, m_DCState.far[1], sizeof(m_WIMMatrixStack));
+    g_MatrixPtr = m_DCState.ptrs[0];
+    g_WMatrixPtr = m_DCState.ptrs[1];
+    m_IMMatrixPtr = m_DCState.ptrs[2];
+    m_WIMMatrixPtr = m_DCState.ptrs[3];
+}
+
+void Matrix_DC_Tops(MATRIX out[4])
+{
+    out[0] = *g_MatrixPtr;
+    out[1] = *g_WMatrixPtr;
+    out[2] = m_IMMatrixPtr != nullptr ? *m_IMMatrixPtr : (MATRIX) {};
+    out[3] = m_WIMMatrixPtr != nullptr ? *m_WIMMatrixPtr : (MATRIX) {};
+}
 #endif
 
 void Matrix_LookAt(
@@ -2073,13 +2132,100 @@ void Matrix_LookAt(
     Matrix_GenerateW2V(&view_pos, &view_rot);
 }
 
-XYZ_32 Matrix_MulVec32_M(const MATRIX *const m, const XYZ_32 v)
+static XYZ_32 M_MulVec32C(const MATRIX *const m, const XYZ_32 v)
 {
     return (XYZ_32) {
         (m->_00 * v.x + m->_01 * v.y + m->_02 * v.z + m->_03) >> W2V_SHIFT,
         (m->_10 * v.x + m->_11 * v.y + m->_12 * v.z + m->_13) >> W2V_SHIFT,
         (m->_20 * v.x + m->_21 * v.y + m->_22 * v.z + m->_23) >> W2V_SHIFT,
     };
+}
+
+#if defined(__DREAMCAST__)
+// In assembly (game_sh4.S, dc_mulvec32): the 64-bit products by dmuls.l in
+// place of __muldi3. 0 where an entry does not fit 32 bits; the C then.
+// TRX_DC_ASMOFF3 bit 134217728 turns it off.
+extern int32_t dc_mulvec32(const MATRIX *m, const int32_t v[3], int32_t out[3]);
+
+    #if defined(DC_EMIT_VERIFY)
+// Random matrices, entries past 32 bits included, against the C, once.
+static void M_MulVecSelfTest(void)
+{
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+    uint32_t seed = 777;
+        #define L_RND() (seed = seed * 1103515245u + 12345u)
+    uint32_t bad = 0;
+    uint32_t fell = 0;
+    for (int32_t i = 0; i < 100000; i++) {
+        MATRIX m;
+        int64_t *const e = &m._00;
+        for (int32_t k = 0; k < 12; k++) {
+            const uint32_t r = L_RND();
+            e[k] = (k % 4 == 3) ? ((int64_t)(int32_t)L_RND() << (r & 15))
+                                : (r & 0x300) == 0x300
+                    ? ((int64_t)(int32_t)L_RND() << 3)
+                    : (int64_t)(int32_t)(L_RND() >> (r & 15));
+        }
+        const XYZ_32 v = {
+            (int32_t)L_RND() >> (L_RND() & 15),
+            (int32_t)L_RND() >> (L_RND() & 15),
+            (int32_t)L_RND() >> (L_RND() & 15),
+        };
+        const int32_t in[3] = { v.x, v.y, v.z };
+        int32_t out[3];
+        if (!dc_mulvec32(&m, in, out)) {
+            fell++;
+            continue;
+        }
+        const XYZ_32 want = M_MulVec32C(&m, v);
+        if ((want.x != out[0] || want.y != out[1] || want.z != out[2])
+            && bad++ < 6) {
+            LOG_WARNING(
+                "[mulvec-verify] MISMATCH %d %d %d / %d %d %d", out[0], out[1],
+                out[2], want.x, want.y, want.z);
+        }
+    }
+        #undef L_RND
+    LOG_WARNING(
+        "[mulvec-verify] self-test 100000, %u to the C, %u bad",
+        (unsigned)fell, (unsigned)bad);
+}
+    #endif
+#endif
+
+XYZ_32 Matrix_MulVec32_M(const MATRIX *const m, const XYZ_32 v)
+{
+#if defined(__DREAMCAST__)
+    if ((g_DC_AsmOff3 & 134217728) == 0) {
+        const int32_t in[3] = { v.x, v.y, v.z };
+        int32_t out[3];
+        if (dc_mulvec32(m, in, out)) {
+    #if defined(DC_EMIT_VERIFY)
+            M_MulVecSelfTest();
+            const XYZ_32 want = M_MulVec32C(m, v);
+            static uint32_t runs;
+            static uint32_t bad;
+            if ((want.x != out[0] || want.y != out[1] || want.z != out[2])
+                && bad++ < 6) {
+                LOG_WARNING(
+                    "[mulvec-verify] MISMATCH %d %d %d / %d %d %d", out[0],
+                    out[1], out[2], want.x, want.y, want.z);
+            }
+            if (++runs % 20000 == 0) {
+                LOG_WARNING(
+                    "[mulvec-verify] %u runs, %u bad", (unsigned)runs,
+                    (unsigned)bad);
+            }
+    #endif
+            return (XYZ_32) { .x = out[0], .y = out[1], .z = out[2] };
+        }
+    }
+#endif
+    return M_MulVec32C(m, v);
 }
 
 XYZ_32 Matrix_GetOffset_M(const MATRIX *const m)

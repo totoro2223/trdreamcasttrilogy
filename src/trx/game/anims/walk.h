@@ -56,6 +56,13 @@ void Anim_Walk_BeginToJoint(
 // Moves the matrix to the next joint. Returns false past the last joint, and
 // leaves the matrix stack as it stands.
 bool Anim_Walk_Next(ANIM_WALK *walk);
+#if defined(__DREAMCAST__)
+// After the root (Anim_Walk_Next once), the rest of the joints in assembly,
+// draw(ctx, joint) called for each. False, with nothing done, where the
+// assembly does not apply; the caller then goes on with Anim_Walk_Next.
+bool Anim_Walk_DC_Rest(
+    ANIM_WALK *walk, void (*draw)(void *ctx, int32_t joint), void *ctx);
+#endif
 
 // Gets a point's position relative to where the walk started. Blending
 // continues for the remaining joints. Call this before Anim_Walk_End, which

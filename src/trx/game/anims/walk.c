@@ -170,6 +170,131 @@ bool Anim_Walk_Next(ANIM_WALK *const walk)
     return true;
 }
 
+#if defined(__DREAMCAST__)
+    #include <trx/core/log.h>
+
+    #include <string.h>
+
+// In assembly (pose_sh4.S, dc_walk_bones); M_EnterJoint is its reference.
+// TRX_DC_ASMOFF3 bit 67108864 turns it off.
+typedef struct {
+    uint32_t *joint;
+    const ANIM_BONE *bones;
+    const XYZ_16 *rots_a;
+    const XYZ_16 *rots_b;
+    const int16_t **extra;
+    int32_t first;
+    int32_t last;
+    int32_t interpolated;
+    void (*rot_y)(int16_t angle);
+    void (*rot_x)(int16_t angle);
+    void (*rot_z)(int16_t angle);
+    void (*draw)(void *ctx, int32_t joint);
+    void *ctx;
+    int32_t *depth;
+} M_WALK_BONES;
+_Static_assert(sizeof(ANIM_BONE) == 17, "dc_walk_bones reads 17-byte bones");
+_Static_assert(sizeof(M_WALK_BONES) == 56, "dc_walk_bones's block");
+extern void dc_walk_bones(const M_WALK_BONES *b);
+extern uint32_t g_DC_AsmOff3;
+
+    #if defined(DC_EMIT_VERIFY)
+        #define M_VERIFY_JOINTS 64
+static MATRIX m_WantTops[M_VERIFY_JOINTS][4];
+static bool m_WalkBad;
+
+typedef struct {
+    void (*draw)(void *ctx, int32_t joint);
+    void *ctx;
+} M_VERIFY_CTX;
+
+static void M_VerifyDraw(void *const ctx, const int32_t joint)
+{
+    MATRIX tops[4];
+    Matrix_DC_Tops(tops);
+    if (memcmp(tops, m_WantTops[joint], sizeof(tops)) != 0) {
+        m_WalkBad = true;
+    }
+    const M_VERIFY_CTX *const v = ctx;
+    v->draw(v->ctx, joint);
+}
+    #endif
+
+bool Anim_Walk_DC_Rest(
+    ANIM_WALK *const walk, void (*const draw)(void *ctx, int32_t joint),
+    void *const ctx)
+{
+    if ((g_DC_AsmOff3 & 67108864) != 0 || walk->joint != 0
+        || walk->bones == nullptr || walk->last_joint < 1) {
+        return false;
+    }
+    uint32_t joint_block[13];
+    if (!Matrix_DC_WalkJointReady(joint_block)) {
+        return false;
+    }
+    const ANIM_POSE *const pose = &walk->desc.pose;
+    M_WALK_BONES b = {
+        .joint = joint_block,
+        .bones = walk->bones,
+        .rots_a = pose->rots_a,
+        .rots_b = pose->rots_b,
+        .extra = &walk->extra_rotation,
+        .first = 1,
+        .last = walk->last_joint,
+        .interpolated = walk->interpolated,
+        .rot_y = walk->interpolated ? Matrix_RotY_I : Matrix_RotY,
+        .rot_x = walk->interpolated ? Matrix_RotX_I : Matrix_RotX,
+        .rot_z = walk->interpolated ? Matrix_RotZ_I : Matrix_RotZ,
+        .draw = draw,
+        .ctx = ctx,
+        .depth = &walk->depth,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    if (walk->last_joint < M_VERIFY_JOINTS) {
+        const int16_t *const extra_in = walk->extra_rotation;
+        const int32_t depth_in = walk->depth;
+        Matrix_DC_SaveState();
+        for (int32_t j = 1; j <= walk->last_joint; j++) {
+            walk->joint = j;
+            M_EnterJoint(walk);
+            Matrix_DC_Tops(m_WantTops[j]);
+        }
+        const int16_t *const extra_want = walk->extra_rotation;
+        const int32_t depth_want = walk->depth;
+        Matrix_DC_LoadState();
+        walk->extra_rotation = extra_in;
+        walk->depth = depth_in;
+        walk->joint = 0;
+        M_VERIFY_CTX v = { .draw = draw, .ctx = ctx };
+        b.draw = M_VerifyDraw;
+        b.ctx = &v;
+        m_WalkBad = false;
+        dc_walk_bones(&b);
+        static uint32_t runs;
+        static uint32_t bad;
+        if ((m_WalkBad || extra_want != walk->extra_rotation
+             || depth_want != walk->depth)
+            && bad++ < 6) {
+            LOG_WARNING(
+                "[bones-verify] MISMATCH joints %d depth %d/%d",
+                walk->last_joint, walk->depth, depth_want);
+        }
+        if (++runs % 1000 == 0) {
+            LOG_WARNING(
+                "[bones-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+    } else {
+        dc_walk_bones(&b);
+    }
+    #else
+    dc_walk_bones(&b);
+    #endif
+    walk->joint = walk->last_joint;
+    return true;
+}
+#endif
+
 XYZ_32 Anim_Walk_GetPos(ANIM_WALK *const walk, const XYZ_32 local)
 {
     ASSERT(!walk->ended);

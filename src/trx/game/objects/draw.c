@@ -137,6 +137,50 @@ static const ANIM_POSE *m_RagdollPose = nullptr;
 static const BOUNDS_16 *m_RagdollBounds = nullptr;
 #endif
 
+#if defined(__DREAMCAST__)
+typedef struct {
+    const OBJECT *obj;
+    uint32_t mesh_mask;
+    CLIP clip;
+    const OBJECT *mesh_swap;
+    bool far_enemy;
+    MESH_INSTANCE *rig;
+    const ANIM_WALK *walk;
+} M_JOINT_CTX;
+
+// One joint's mesh, the walk's matrices in place.
+static void M_DrawJoint(void *const ctx, const int32_t mesh_idx)
+{
+    const M_JOINT_CTX *const jc = ctx;
+    const OBJECT *const obj = jc->obj;
+    const bool interpolated = jc->walk->interpolated;
+    bool small_far = false;
+    // TRX_DC_ASMOFF2 bit 32768 (on by default) keeps them all.
+    if (jc->far_enemy && jc->mesh_swap == nullptr && mesh_idx != 0
+        && (g_DC_AsmOff2 & 32768) == 0) {
+        const OBJECT_MESH *const mesh =
+            Object_GetMesh(obj->mesh_idx + mesh_idx);
+        small_far = mesh->num_vertices <= M_FAR_ENEMY_MESH_VERTICES
+            && mesh->radius < M_FAR_ENEMY_MESH_RADIUS;
+    }
+    if (jc->rig != nullptr) {
+        OutputSource_Objects_RigBone(jc->rig, mesh_idx, interpolated, small_far);
+        return;
+    }
+    if (small_far) {
+        return;
+    }
+    DC_PROBE_START(probe_mesh);
+    if ((jc->mesh_mask & (1u << mesh_idx)) != 0) {
+        Object_DrawMesh(obj->mesh_idx + mesh_idx, jc->clip, interpolated);
+    } else if (jc->mesh_swap != nullptr) {
+        Object_DrawMesh(
+            jc->mesh_swap->mesh_idx + mesh_idx, jc->clip, interpolated);
+    }
+    DC_PROBE_STOP(DC_PROBE_I_MESH, probe_mesh);
+}
+#endif
+
 static bool M_DrawInterpolatedObject(
     const OBJECT *const obj, const uint32_t mesh_mask,
     const int16_t *extra_rotation, const ANIM_FRAME *const frame1,
@@ -229,42 +273,48 @@ static bool M_DrawInterpolatedObject(
             .applies_base_rot = true,
             .skips_frame_offset = skips_frame_offset,
         });
-    for (;;) {
-        DC_PROBE_START(probe_walk);
-        const bool more = Anim_Walk_Next(&walk);
-        DC_PROBE_STOP(DC_PROBE_I_WALK, probe_walk);
-        if (!more) {
-            break;
-        }
-        const int32_t mesh_idx = walk.joint;
 #if defined(__DREAMCAST__)
-        bool small_far = false;
-        // TRX_DC_ASMOFF2 bit 32768 (on by default) keeps them all.
-        if (far_enemy && mesh_swap == nullptr && mesh_idx != 0
-            && (g_DC_AsmOff2 & 32768) == 0) {
-            const OBJECT_MESH *const mesh =
-                Object_GetMesh(obj->mesh_idx + mesh_idx);
-            small_far = mesh->num_vertices <= M_FAR_ENEMY_MESH_VERTICES
-                && mesh->radius < M_FAR_ENEMY_MESH_RADIUS;
+    const M_JOINT_CTX jc = {
+        .obj = obj,
+        .mesh_mask = mesh_mask,
+        .clip = clip,
+        .mesh_swap = mesh_swap,
+        .far_enemy = far_enemy,
+        .rig = rig,
+        .walk = &walk,
+    };
+    DC_PROBE_START(probe_root);
+    const bool any = Anim_Walk_Next(&walk);
+    DC_PROBE_STOP(DC_PROBE_I_WALK, probe_root);
+    if (any) {
+        M_DrawJoint((void *)&jc, walk.joint);
+        // The rest in assembly (the time of their draws counted in too).
+        DC_PROBE_START(probe_rest);
+        const bool rest = Anim_Walk_DC_Rest(&walk, M_DrawJoint, (void *)&jc);
+        DC_PROBE_STOP(DC_PROBE_I_WALK, probe_rest);
+        if (!rest) {
+            for (;;) {
+                DC_PROBE_START(probe_walk);
+                const bool more = Anim_Walk_Next(&walk);
+                DC_PROBE_STOP(DC_PROBE_I_WALK, probe_walk);
+                if (!more) {
+                    break;
+                }
+                M_DrawJoint((void *)&jc, walk.joint);
+            }
         }
-        if (rig != nullptr) {
-            OutputSource_Objects_RigBone(
-                rig, mesh_idx, walk.interpolated, small_far);
-            continue;
-        }
-        if (small_far) {
-            continue;
-        }
-#endif
-        DC_PROBE_START(probe_mesh);
+    }
+#else
+    while (Anim_Walk_Next(&walk)) {
+        const int32_t mesh_idx = walk.joint;
         if ((mesh_mask & (1u << mesh_idx)) != 0) {
             Object_DrawMesh(obj->mesh_idx + mesh_idx, clip, walk.interpolated);
         } else if (mesh_swap != nullptr) {
             Object_DrawMesh(
                 mesh_swap->mesh_idx + mesh_idx, clip, walk.interpolated);
         }
-        DC_PROBE_STOP(DC_PROBE_I_MESH, probe_mesh);
     }
+#endif
     Anim_Walk_End(&walk);
 #if defined(__DREAMCAST__)
     if (rig != nullptr) {

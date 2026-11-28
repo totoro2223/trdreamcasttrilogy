@@ -8,6 +8,10 @@
 
 #include <string.h>
 
+#if defined(__DREAMCAST__)
+    #include <trx/game/random.h>
+#endif
+
 // clang-format off
 #define M_LOS_STEPS         8
 #define M_MAX_SNAPS         8
@@ -421,7 +425,7 @@ static bool M_UpdateLaraState(void)
     return true;
 }
 
-static void M_Move(GAME_VECTOR *const ideal, const int32_t speed)
+static void M_MoveC(GAME_VECTOR *const ideal, const int32_t speed)
 {
     if (M_UpdateLaraState()) {
         m_LastIdeal.pos = *ideal;
@@ -506,7 +510,195 @@ static void M_Move(GAME_VECTOR *const ideal, const int32_t speed)
     Camera_UpdateMicPosition();
 }
 
-static GAME_VECTOR M_GetIdeal(
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S: dc_cam3_move, dc_cam3_ideal, dc_cam3_target,
+// dc_cam3_look_walk, dc_cam3_look_close); the C is their reference.
+// TRX_DC_ASMOFF3 bit 33554432 turns them off.
+typedef struct {
+    GAME_VECTOR *cam;
+    GAME_VECTOR *ideal;
+    int32_t speed;
+    GAME_VECTOR *last;
+    GAME_VECTOR *target;
+    int32_t *snaps;
+    int32_t (*state)(void);
+    void (*bounce)(void);
+    int32_t (*sw)(const int32_t *pos, int16_t *room, int32_t *out);
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out, int32_t tilts);
+    void (*sec)(const int32_t *pos, int16_t *room);
+    int32_t (*los)(GAME_VECTOR *a, GAME_VECTOR *b, int32_t shift);
+} M_CAM3_MOVE;
+typedef struct {
+    GAME_VECTOR *out;
+    const GAME_VECTOR *target;
+    const GAME_VECTOR *pos;
+    int32_t distance;
+    int32_t elevation;
+    int32_t target_distance;
+    int32_t angle;
+    int32_t (*sin)(int32_t angle);
+    int32_t (*los)(GAME_VECTOR *a, GAME_VECTOR *b, int32_t shift);
+} M_CAM3_IDEAL;
+typedef struct {
+    GAME_VECTOR *target;
+    int16_t *elevation;
+    int32_t margin;
+    const GAME_VECTOR *last;
+    int32_t (*sw)(const int32_t *pos, int16_t *room, int32_t *out);
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out, int32_t tilts);
+    void (*sec)(const int32_t *pos, int16_t *room);
+} M_CAM3_TARGET;
+typedef struct {
+    int32_t *pos;
+    const int32_t *delta;
+    int16_t *room;
+    int32_t (*sw)(const int32_t *pos, int16_t *room, int32_t *out);
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out, int32_t tilts);
+} M_CAM3_WALK;
+typedef struct {
+    GAME_VECTOR *cam;
+    GAME_VECTOR *target;
+    const GAME_VECTOR *ideal;
+    const int32_t *pos_3;
+    const int32_t *pos_1;
+    int32_t fixed;
+    int32_t lara_room;
+    int32_t same_type;
+    void (*bounce)(void);
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out, int32_t tilts);
+    void (*sec)(const int32_t *pos, int16_t *room);
+    int32_t (*los)(GAME_VECTOR *a, GAME_VECTOR *b, int32_t shift);
+} M_CAM3_CLOSE;
+extern void dc_cam3_move(const M_CAM3_MOVE *b);
+extern void dc_cam3_ideal(const M_CAM3_IDEAL *b);
+extern void dc_cam3_target(const M_CAM3_TARGET *b);
+extern void dc_cam3_look_walk(const M_CAM3_WALK *b);
+extern void dc_cam3_look_close(const M_CAM3_CLOSE *b);
+
+// Room_GetSector; out[2] the room's ceiling less a step; whether a swamp.
+static int32_t M_C3Sw(
+    const int32_t *const p, int16_t *const room, int32_t *const out)
+{
+    Room_GetSector((XYZ_32) { .x = p[0], .y = p[1], .z = p[2] }, room);
+    const ROOM *const r = Room_Get(*room);
+    out[2] = r->max_ceiling - STEP_L;
+    return r->flags.swamp ? 1 : 0;
+}
+
+// The same with the height and the ceiling in out[0] and out[1].
+static int32_t M_C3HC(
+    const int32_t *const p, int16_t *const room, int32_t *const out,
+    const int32_t tilts)
+{
+    const XYZ_32 pos = { .x = p[0], .y = p[1], .z = p[2] };
+    const SECTOR *const sector = Room_GetSector(pos, room);
+    if (tilts) {
+        out[0] = Room_GetHeightEx(
+            sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
+        out[1] = Room_GetCeilingEx(
+            sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
+    } else {
+        out[0] = Room_GetHeight(sector, pos);
+        out[1] = Room_GetCeiling(sector, pos);
+    }
+    const ROOM *const r = Room_Get(*room);
+    out[2] = r->max_ceiling - STEP_L;
+    return r->flags.swamp ? 1 : 0;
+}
+
+static int32_t M_C3State(void)
+{
+    return M_UpdateLaraState() ? 1 : 0;
+}
+
+static int32_t M_C3Los(
+    GAME_VECTOR *const a, GAME_VECTOR *const b, const int32_t shift)
+{
+    return M_LOS(a, b, shift) ? 1 : 0;
+}
+
+    #if defined(DC_EMIT_VERIFY)
+static void M_C3Report(const char *const name, const bool same)
+{
+    static uint32_t runs[5];
+    static uint32_t bad[5];
+    static const char *names[5];
+    int32_t k = 0;
+    while (k < 4 && names[k] != nullptr && names[k] != name) {
+        k++;
+    }
+    names[k] = name;
+    if (!same && bad[k]++ < 6) {
+        LOG_WARNING("[%s-verify] MISMATCH", name);
+    }
+    if (++runs[k] % 1000 == 0) {
+        LOG_WARNING(
+            "[%s-verify] %u runs, %u bad", name, (unsigned)runs[k],
+            (unsigned)bad[k]);
+    }
+}
+    #endif
+
+static void M_Move(GAME_VECTOR *const ideal, const int32_t speed)
+{
+    if ((g_DC_AsmOff3 & 33554432) != 0) {
+        M_MoveC(ideal, speed);
+        return;
+    }
+    const M_CAM3_MOVE b = {
+        .cam = &g_Camera.pos,
+        .ideal = ideal,
+        .speed = speed,
+        .last = &m_LastIdeal.pos,
+        .target = &g_Camera.target,
+        .snaps = &m_Snaps,
+        .state = M_C3State,
+        .bounce = Camera_ApplyBounce,
+        .sw = M_C3Sw,
+        .hc = M_C3HC,
+        .sec = M_CamSec,
+        .los = M_C3Los,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    const CAMERA_INFO cam_in = g_Camera;
+    const M_STATE state_in = m_LastState;
+    const M_IDEAL last_in = m_LastIdeal;
+    const int32_t snaps_in = m_Snaps;
+    const GAME_VECTOR ideal_in = *ideal;
+    const uint32_t seed_in = *Random_GetControlState();
+    M_MoveC(ideal, speed);
+    const CAMERA_INFO cam_want = g_Camera;
+    const M_STATE state_want = m_LastState;
+    const M_IDEAL last_want = m_LastIdeal;
+    const int32_t snaps_want = m_Snaps;
+    const GAME_VECTOR ideal_want = *ideal;
+    const uint32_t seed_want = *Random_GetControlState();
+    g_Camera = cam_in;
+    m_LastState = state_in;
+    m_LastIdeal = last_in;
+    m_Snaps = snaps_in;
+    *ideal = ideal_in;
+    *Random_GetControlState() = seed_in;
+    #endif
+    dc_cam3_move(&b);
+    m_LastState.cam_type = g_Camera.type;
+    Camera_UpdateMicPosition();
+    #if defined(DC_EMIT_VERIFY)
+    M_C3Report(
+        "cam3move",
+        memcmp(&cam_want, &g_Camera, sizeof(cam_want)) == 0
+            && memcmp(&state_want, &m_LastState, sizeof(state_want)) == 0
+            && memcmp(&last_want, &m_LastIdeal, sizeof(last_want)) == 0
+            && snaps_want == m_Snaps
+            && memcmp(&ideal_want, ideal, sizeof(ideal_want)) == 0
+            && seed_want == *Random_GetControlState());
+    #endif
+}
+#else
+    #define M_Move M_MoveC
+#endif
+
+static GAME_VECTOR M_GetIdealC(
     const int32_t distance, const int16_t target_rot_y)
 {
     int32_t farthest = 0x7FFFFFFF;
@@ -560,18 +752,42 @@ static GAME_VECTOR M_GetIdeal(
     return ideals[farthest_num];
 }
 
-static void M_Chase(const ITEM *const item)
+#if defined(__DREAMCAST__)
+static GAME_VECTOR M_GetIdeal(const int32_t distance, const int16_t target_rot_y)
 {
-    if (g_Camera.target_elevation == 0) {
-        g_Camera.target_elevation = M_DEFAULT_ELEVATION;
+    if ((g_DC_AsmOff3 & 33554432) != 0) {
+        return M_GetIdealC(distance, target_rot_y);
     }
-    g_Camera.target_elevation += item->rot.x;
-    CLAMP(g_Camera.target_elevation, -M_MAX_ELEVATION, M_MAX_ELEVATION);
+    GAME_VECTOR out;
+    const M_CAM3_IDEAL b = {
+        .out = &out,
+        .target = &g_Camera.target,
+        .pos = &g_Camera.pos,
+        .distance = distance,
+        .elevation = g_Camera.target_elevation,
+        .target_distance = g_Camera.target_distance,
+        .angle = (int16_t)(g_Camera.target_angle + target_rot_y),
+        .sin = Math_Sin,
+        .los = M_C3Los,
+    };
+    dc_cam3_ideal(&b);
+    #if defined(DC_EMIT_VERIFY)
+    const GAME_VECTOR want = M_GetIdealC(distance, target_rot_y);
+    M_C3Report(
+        "cam3ideal",
+        want.x == out.x && want.y == out.y && want.z == out.z
+            && want.room_num == out.room_num);
+    #endif
+    return out;
+}
+#else
+    #define M_GetIdeal M_GetIdealC
+#endif
 
-    const int32_t distance =
-        (g_Camera.target_distance * Math_Cos(g_Camera.target_elevation))
-        >> W2V_SHIFT;
-
+// The camera's target kept a margin within its floor and its ceiling, or
+// back where it last was good.
+static void M_FixTargetC(const int32_t m)
+{
     int16_t room_num = g_Camera.target.room_num;
     const SECTOR *sector = Room_GetSector(
         (XYZ_32) {
@@ -593,22 +809,22 @@ static void M_Chase(const ITEM *const item)
     int32_t ceiling = Room_GetCeilingEx(
         sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
 
-    if (ceiling + 16 > height - 16 && height != NO_HEIGHT
+    if (ceiling + m > height - m && height != NO_HEIGHT
         && ceiling != NO_HEIGHT) {
         g_Camera.target.y = (height + ceiling) >> 1;
         g_Camera.target_elevation = 0;
-    } else if (pos.y > height - 16 && height != NO_HEIGHT) {
-        g_Camera.target.y = height - 16;
+    } else if (pos.y > height - m && height != NO_HEIGHT) {
+        g_Camera.target.y = height - m;
         g_Camera.target_elevation = 0;
-    } else if (pos.y < ceiling + 16 && ceiling != NO_HEIGHT) {
-        g_Camera.target.y = ceiling + 16;
+    } else if (pos.y < ceiling + m && ceiling != NO_HEIGHT) {
+        g_Camera.target.y = ceiling + m;
         g_Camera.target_elevation = 0;
     }
 
-    sector = Room_GetSector(g_Camera.target.pos, &g_Camera.target.room_num);
+    Room_GetSector(g_Camera.target.pos, &g_Camera.target.room_num);
     pos = g_Camera.target.pos;
     room_num = g_Camera.target.room_num;
-    sector = Room_GetSector(g_Camera.target.pos, &room_num);
+    sector = Room_GetSector(pos, &room_num);
     height =
         Room_GetHeightEx(sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
     ceiling = Room_GetCeilingEx(
@@ -618,6 +834,77 @@ static void M_Chase(const ITEM *const item)
         || height == NO_HEIGHT || ceiling == NO_HEIGHT) {
         g_Camera.target = m_LastIdeal.target;
     }
+}
+
+#if defined(__DREAMCAST__)
+static void M_FixTarget(const int32_t m)
+{
+    if ((g_DC_AsmOff3 & 33554432) != 0) {
+        M_FixTargetC(m);
+        return;
+    }
+    const M_CAM3_TARGET b = {
+        .target = &g_Camera.target,
+        .elevation = &g_Camera.target_elevation,
+        .margin = m,
+        .last = &m_LastIdeal.target,
+        .sw = M_C3Sw,
+        .hc = M_C3HC,
+        .sec = M_CamSec,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    const CAMERA_INFO cam_in = g_Camera;
+    M_FixTargetC(m);
+    const CAMERA_INFO want = g_Camera;
+    g_Camera = cam_in;
+    dc_cam3_target(&b);
+    M_C3Report("cam3target", memcmp(&want, &g_Camera, sizeof(want)) == 0);
+    #else
+    dc_cam3_target(&b);
+    #endif
+}
+#else
+    #define M_FixTarget M_FixTargetC
+#endif
+
+#if defined(__DREAMCAST__) && defined(DC_EMIT_VERIFY)
+static void M_LookWalk(XYZ_32 *pos, XYZ_32 delta, int16_t *room);
+static void M_LookClose(
+    const GAME_VECTOR *ideal, XYZ_32 pos_1, XYZ_32 pos_3);
+#endif
+static void M_Chase(const ITEM *const item)
+{
+    if (g_Camera.target_elevation == 0) {
+        g_Camera.target_elevation = M_DEFAULT_ELEVATION;
+    }
+    g_Camera.target_elevation += item->rot.x;
+    CLAMP(g_Camera.target_elevation, -M_MAX_ELEVATION, M_MAX_ELEVATION);
+
+    const int32_t distance =
+        (g_Camera.target_distance * Math_Cos(g_Camera.target_elevation))
+        >> W2V_SHIFT;
+
+    M_FixTarget(16);
+#if defined(__DREAMCAST__) && defined(DC_EMIT_VERIFY)
+    {
+        // M_Look's walk and close run only when looking: tried here on
+        // copies (their verifies compare the two), the camera put back.
+        const CAMERA_INFO cam_in = g_Camera;
+        const uint32_t seed_in = *Random_GetControlState();
+        XYZ_32 p = g_Camera.target.pos;
+        const XYZ_32 d = {
+            (g_Camera.pos.x - p.x) >> 3,
+            (g_Camera.pos.y - p.y) >> 3,
+            (g_Camera.pos.z - p.z) >> 3,
+        };
+        int16_t r = g_Camera.target.room_num;
+        M_LookWalk(&p, d, &r);
+        const GAME_VECTOR ideal = { .pos = p, .room_num = r };
+        M_LookClose(&ideal, g_Camera.target.pos, g_Camera.target.pos);
+        g_Camera = cam_in;
+        *Random_GetControlState() = seed_in;
+    }
+#endif
 
     GAME_VECTOR ideal = M_GetIdeal(distance, item->rot.y);
     M_Collide(&ideal, M_CHASE_SHIFT, true);
@@ -645,52 +932,7 @@ static void M_Combat(const ITEM *const item)
             lara->head_rot.x + item->rot.x + lara->torso_rot.x - 2730;
     }
 
-    int16_t room_num = g_Camera.target.room_num;
-    const SECTOR *sector = Room_GetSector(
-        (XYZ_32) {
-            g_Camera.target.x,
-            g_Camera.target.y + STEP_L,
-            g_Camera.target.z,
-        },
-        &room_num);
-
-    const ROOM *const room = Room_Get(room_num);
-    if (room->flags.swamp) {
-        g_Camera.target.y = room->max_ceiling - STEP_L;
-    }
-
-    XYZ_32 pos = g_Camera.target.pos;
-    sector = Room_GetSector(pos, &g_Camera.target.room_num);
-    int32_t height =
-        Room_GetHeightEx(sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
-    int32_t ceiling = Room_GetCeilingEx(
-        sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
-
-    if (ceiling + 64 > height - 64 && height != NO_HEIGHT
-        && ceiling != NO_HEIGHT) {
-        g_Camera.target.y = (ceiling + height) >> 1;
-        g_Camera.target_elevation = 0;
-    } else if (pos.y > height - 64 && height != NO_HEIGHT) {
-        g_Camera.target.y = height - 64;
-        g_Camera.target_elevation = 0;
-    } else if (pos.y < ceiling + 64 && ceiling != NO_HEIGHT) {
-        g_Camera.target.y = ceiling + 64;
-        g_Camera.target_elevation = 0;
-    }
-
-    pos = g_Camera.target.pos;
-    Room_GetSector(pos, &g_Camera.target.room_num);
-    room_num = g_Camera.target.room_num;
-    sector = Room_GetSector(pos, &room_num);
-    height =
-        Room_GetHeightEx(sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
-    ceiling = Room_GetCeilingEx(
-        sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
-
-    if (pos.y < ceiling || pos.y > height || ceiling >= height
-        || height == NO_HEIGHT || ceiling == NO_HEIGHT) {
-        g_Camera.target = m_LastIdeal.target;
-    }
+    M_FixTarget(64);
 
     g_Camera.target_distance = CAMERA_DEFAULT_DISTANCE;
     const int32_t distance =
@@ -742,6 +984,203 @@ static XYZ_32 M_GetHeadPos(const int32_t x, const int32_t y, const int32_t z)
     }
     return pos;
 }
+
+// From Lara's head out along delta, while the place is good.
+static void M_LookWalkC(
+    XYZ_32 *const pos, const XYZ_32 delta, int16_t *const room)
+{
+    XYZ_32 ideal_pos = *pos;
+    int16_t room_num = *room;
+    const SECTOR *sector;
+    int32_t height;
+    int32_t ceiling;
+
+    int32_t i = 0;
+    for (; i < M_LOS_STEPS; i++) {
+        int16_t next_room_num = room_num;
+        sector = Room_GetSector(
+            (XYZ_32) { ideal_pos.x, ideal_pos.y + STEP_L, ideal_pos.z },
+            &next_room_num);
+
+        if (Room_Get(next_room_num)->flags.swamp) {
+            ideal_pos.y = Room_Get(next_room_num)->max_ceiling - STEP_L;
+            break;
+        }
+
+        sector = Room_GetSector(ideal_pos, &next_room_num);
+        height = Room_GetHeight(sector, ideal_pos);
+        ceiling = Room_GetCeiling(sector, ideal_pos);
+
+        if (height == NO_HEIGHT || ceiling == NO_HEIGHT || ceiling >= height
+            || ideal_pos.y > height || ideal_pos.y < ceiling) {
+            break;
+        }
+
+        room_num = next_room_num;
+        ideal_pos.x += delta.x;
+        ideal_pos.y += delta.y;
+        ideal_pos.z += delta.z;
+    }
+
+    if (i != 0) {
+        ideal_pos.x -= delta.x;
+        ideal_pos.y -= delta.y;
+        ideal_pos.z -= delta.z;
+    }
+    *pos = ideal_pos;
+    *room = room_num;
+}
+
+// The camera to its ideal and kept within the floor and the ceiling.
+static void M_LookCloseC(
+    const GAME_VECTOR *const ideal_in, const XYZ_32 pos_1, const XYZ_32 pos_3)
+{
+    const GAME_VECTOR ideal = *ideal_in;
+    const int16_t lara_room = Lara_GetItem()->room_num;
+    XYZ_32 ideal_pos;
+    int16_t room_num;
+    const SECTOR *sector;
+    int32_t height;
+    int32_t ceiling;
+
+    if (m_LastState.cam_type == CAM_FIXED) {
+        g_Camera.pos.pos = ideal.pos;
+        g_Camera.target.pos = pos_3;
+    } else {
+        g_Camera.pos.x += (ideal.x - g_Camera.pos.x) >> 2;
+        g_Camera.pos.y += (ideal.y - g_Camera.pos.y) >> 2;
+        g_Camera.pos.z += (ideal.z - g_Camera.pos.z) >> 2;
+        g_Camera.target.x += (pos_3.x - g_Camera.target.x) >> 2;
+        g_Camera.target.y += (pos_3.y - g_Camera.target.y) >> 2;
+        g_Camera.target.z += (pos_3.z - g_Camera.target.z) >> 2;
+    }
+
+    g_Camera.target.room_num = lara_room;
+
+    if (g_Camera.type == m_LastState.cam_type) {
+        Camera_ApplyBounce();
+    }
+
+    Room_GetSector(g_Camera.pos.pos, &g_Camera.pos.room_num);
+    ideal_pos = g_Camera.pos.pos;
+    room_num = g_Camera.pos.room_num;
+    sector = Room_GetSector(ideal_pos, &room_num);
+    height = Room_GetHeight(sector, ideal_pos);
+    ceiling = Room_GetCeiling(sector, ideal_pos);
+
+    if (ceiling != NO_HEIGHT && height != NO_HEIGHT) {
+        if (ceiling > ideal_pos.y - 255 && height < ideal_pos.y + 255
+            && height > ceiling) {
+            g_Camera.pos.y = (ceiling + height) >> 1;
+        } else if (height < ideal_pos.y + 255 && height > ceiling) {
+            g_Camera.pos.y = height - 255;
+        } else if (ceiling > ideal_pos.y - 255 && height > ceiling) {
+            g_Camera.pos.y = ceiling + 255;
+        }
+    }
+
+    ideal_pos = g_Camera.pos.pos;
+    room_num = g_Camera.pos.room_num;
+    sector = Room_GetSector(ideal_pos, &room_num);
+    height = Room_GetHeight(sector, ideal_pos);
+    ceiling = Room_GetCeiling(sector, ideal_pos);
+
+    if (Room_Get(room_num)->flags.swamp) {
+        g_Camera.pos.y = Room_Get(room_num)->max_ceiling - STEP_L;
+    } else if (
+        ideal_pos.y < ceiling || ideal_pos.y > height || ceiling >= height
+        || height == NO_HEIGHT || ceiling == NO_HEIGHT) {
+        M_LOS(&g_Camera.target, &g_Camera.pos, 0);
+    }
+
+    ideal_pos = g_Camera.pos.pos;
+    room_num = g_Camera.pos.room_num;
+    sector = Room_GetSector(ideal_pos, &room_num);
+    height = Room_GetHeight(sector, ideal_pos);
+    ceiling = Room_GetCeiling(sector, ideal_pos);
+
+    if (ideal_pos.y < ceiling || ideal_pos.y > height || ceiling >= height
+        || height == NO_HEIGHT || ceiling == NO_HEIGHT
+        || Room_Get(room_num)->flags.swamp) {
+        g_Camera.pos.pos = pos_1;
+        g_Camera.pos.room_num = lara_room;
+    }
+
+    Room_GetSector(g_Camera.pos.pos, &g_Camera.pos.room_num);
+}
+
+#if defined(__DREAMCAST__)
+static void M_LookWalk(
+    XYZ_32 *const pos, const XYZ_32 delta, int16_t *const room)
+{
+    if ((g_DC_AsmOff3 & 33554432) != 0) {
+        M_LookWalkC(pos, delta, room);
+        return;
+    }
+    // Through aligned words: XYZ_32 is packed.
+    int32_t p[3] = { pos->x, pos->y, pos->z };
+    const int32_t d[3] = { delta.x, delta.y, delta.z };
+    int16_t r = *room;
+    const M_CAM3_WALK b = {
+        .pos = p, .delta = d, .room = &r, .sw = M_C3Sw, .hc = M_C3HC,
+    };
+    dc_cam3_look_walk(&b);
+    #if defined(DC_EMIT_VERIFY)
+    XYZ_32 want = *pos;
+    int16_t want_room = *room;
+    M_LookWalkC(&want, delta, &want_room);
+    M_C3Report(
+        "cam3walk",
+        want.x == p[0] && want.y == p[1] && want.z == p[2] && want_room == r);
+    #endif
+    *pos = (XYZ_32) { .x = p[0], .y = p[1], .z = p[2] };
+    *room = r;
+}
+
+static void M_LookClose(
+    const GAME_VECTOR *const ideal, const XYZ_32 pos_1, const XYZ_32 pos_3)
+{
+    if ((g_DC_AsmOff3 & 33554432) != 0) {
+        M_LookCloseC(ideal, pos_1, pos_3);
+        return;
+    }
+    const int32_t p1[3] = { pos_1.x, pos_1.y, pos_1.z };
+    const int32_t p3[3] = { pos_3.x, pos_3.y, pos_3.z };
+    const M_CAM3_CLOSE b = {
+        .cam = &g_Camera.pos,
+        .target = &g_Camera.target,
+        .ideal = ideal,
+        .pos_3 = p3,
+        .pos_1 = p1,
+        .fixed = m_LastState.cam_type == CAM_FIXED,
+        .lara_room = Lara_GetItem()->room_num,
+        .same_type = g_Camera.type == m_LastState.cam_type,
+        .bounce = Camera_ApplyBounce,
+        .hc = M_C3HC,
+        .sec = M_CamSec,
+        .los = M_C3Los,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    const CAMERA_INFO cam_in = g_Camera;
+    const uint32_t seed_in = *Random_GetControlState();
+    M_LookCloseC(ideal, pos_1, pos_3);
+    const CAMERA_INFO want = g_Camera;
+    const uint32_t seed_want = *Random_GetControlState();
+    g_Camera = cam_in;
+    *Random_GetControlState() = seed_in;
+    dc_cam3_look_close(&b);
+    M_C3Report(
+        "cam3close",
+        memcmp(&want, &g_Camera, sizeof(want)) == 0
+            && seed_want == *Random_GetControlState());
+    #else
+    dc_cam3_look_close(&b);
+    #endif
+}
+#else
+    #define M_LookWalk M_LookWalkC
+    #define M_LookClose M_LookCloseC
+#endif
 
 static void M_Look(const ITEM *const item)
 {
@@ -824,39 +1263,7 @@ static void M_Look(const ITEM *const item)
 
     XYZ_32 ideal_pos = pos_1;
     room_num = lara_item->room_num;
-
-    int32_t i = 0;
-    for (; i < M_LOS_STEPS; i++) {
-        int16_t next_room_num = room_num;
-        sector = Room_GetSector(
-            (XYZ_32) { ideal_pos.x, ideal_pos.y + STEP_L, ideal_pos.z },
-            &next_room_num);
-
-        if (Room_Get(next_room_num)->flags.swamp) {
-            ideal_pos.y = Room_Get(next_room_num)->max_ceiling - STEP_L;
-            break;
-        }
-
-        sector = Room_GetSector(ideal_pos, &next_room_num);
-        height = Room_GetHeight(sector, ideal_pos);
-        ceiling = Room_GetCeiling(sector, ideal_pos);
-
-        if (height == NO_HEIGHT || ceiling == NO_HEIGHT || ceiling >= height
-            || ideal_pos.y > height || ideal_pos.y < ceiling) {
-            break;
-        }
-
-        room_num = next_room_num;
-        ideal_pos.x += delta.x;
-        ideal_pos.y += delta.y;
-        ideal_pos.z += delta.z;
-    }
-
-    if (i != 0) {
-        ideal_pos.x -= delta.x;
-        ideal_pos.y -= delta.y;
-        ideal_pos.z -= delta.z;
-    }
+    M_LookWalk(&ideal_pos, delta, &room_num);
 
     GAME_VECTOR ideal = {
         .pos = ideal_pos,
@@ -871,71 +1278,7 @@ static void M_Look(const ITEM *const item)
     }
 
     M_Collide(&ideal, M_LOOK_SHIFT, true);
-
-    if (m_LastState.cam_type == CAM_FIXED) {
-        g_Camera.pos.pos = ideal.pos;
-        g_Camera.target.pos = pos_3;
-    } else {
-        g_Camera.pos.x += (ideal.x - g_Camera.pos.x) >> 2;
-        g_Camera.pos.y += (ideal.y - g_Camera.pos.y) >> 2;
-        g_Camera.pos.z += (ideal.z - g_Camera.pos.z) >> 2;
-        g_Camera.target.x += (pos_3.x - g_Camera.target.x) >> 2;
-        g_Camera.target.y += (pos_3.y - g_Camera.target.y) >> 2;
-        g_Camera.target.z += (pos_3.z - g_Camera.target.z) >> 2;
-    }
-
-    g_Camera.target.room_num = lara_item->room_num;
-
-    if (g_Camera.type == m_LastState.cam_type) {
-        Camera_ApplyBounce();
-    }
-
-    Room_GetSector(g_Camera.pos.pos, &g_Camera.pos.room_num);
-    ideal_pos = g_Camera.pos.pos;
-    room_num = g_Camera.pos.room_num;
-    sector = Room_GetSector(ideal_pos, &room_num);
-    height = Room_GetHeight(sector, ideal_pos);
-    ceiling = Room_GetCeiling(sector, ideal_pos);
-
-    if (ceiling != NO_HEIGHT && height != NO_HEIGHT) {
-        if (ceiling > ideal_pos.y - 255 && height < ideal_pos.y + 255
-            && height > ceiling) {
-            g_Camera.pos.y = (ceiling + height) >> 1;
-        } else if (height < ideal_pos.y + 255 && height > ceiling) {
-            g_Camera.pos.y = height - 255;
-        } else if (ceiling > ideal_pos.y - 255 && height > ceiling) {
-            g_Camera.pos.y = ceiling + 255;
-        }
-    }
-
-    ideal_pos = g_Camera.pos.pos;
-    room_num = g_Camera.pos.room_num;
-    sector = Room_GetSector(ideal_pos, &room_num);
-    height = Room_GetHeight(sector, ideal_pos);
-    ceiling = Room_GetCeiling(sector, ideal_pos);
-
-    if (Room_Get(room_num)->flags.swamp) {
-        g_Camera.pos.y = Room_Get(room_num)->max_ceiling - STEP_L;
-    } else if (
-        ideal_pos.y < ceiling || ideal_pos.y > height || ceiling >= height
-        || height == NO_HEIGHT || ceiling == NO_HEIGHT) {
-        M_LOS(&g_Camera.target, &g_Camera.pos, 0);
-    }
-
-    ideal_pos = g_Camera.pos.pos;
-    room_num = g_Camera.pos.room_num;
-    sector = Room_GetSector(ideal_pos, &room_num);
-    height = Room_GetHeight(sector, ideal_pos);
-    ceiling = Room_GetCeiling(sector, ideal_pos);
-
-    if (ideal_pos.y < ceiling || ideal_pos.y > height || ceiling >= height
-        || height == NO_HEIGHT || ceiling == NO_HEIGHT
-        || Room_Get(room_num)->flags.swamp) {
-        g_Camera.pos.pos = pos_1;
-        g_Camera.pos.room_num = lara_item->room_num;
-    }
-
-    Room_GetSector(g_Camera.pos.pos, &g_Camera.pos.room_num);
+    M_LookClose(&ideal, pos_1, pos_3);
     m_LastState.cam_type = g_Camera.type;
 
     Camera_UpdateMicPosition();

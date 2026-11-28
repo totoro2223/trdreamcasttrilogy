@@ -62,7 +62,7 @@ grupos apunta a `dc_surface_height` en los suelos inclinados y a la suma de llam
 `iwalk` e `imesh` bajan solo con los giros float y la copia de matrices. Flycast no modela la
 FPU/multiplicación del SH-4: la ganancia, si hay, sería en consola (sin probar).
 
-Pendiente de esta tanda: camino de cámara (`los_camera.c`, `box_camera.c`), `Collide_GetCollisionInfo`,
+Pendiente de esta tanda (la cámara ya está en ASM salvo el seguimiento de cabeza de `M_Update` y `M_ClampResult`): `Collide_GetCollisionInfo`,
 control de Lara, `Creature_Animate`/`Creature_Mood`, `post`.
 
 ## 2. Pendiente, por coste medido
@@ -130,6 +130,10 @@ verlas.
 | `dc_creature_mood`, `dc_creature_animate`, `dc_target_box` (`creature_sh4.S`); `dc_hair_step` (`hair_sh4.S`); `dc_sil_faces` (`soft_sh4.S`); `dc_nat_water`, `dc_tr3_light`, `dc_fill_matrix`, `dc_obj_key` (`inst_sh4.S`) | Humor y movimiento de enemigos, caja objetivo, pelo de Lara, siluetas de la sombra suave, agua de TR3 en lotes, luz de objetos TR3, matriz de instancia, clave de la caché de colores | `[mood-verify]`, `[aiinfo-verify]`, hash de demos de Animate, `[tbox-verify]`, `[hair-verify]`, `[silfaces-verify]`, `[tr3light-verify]`, `[fillmat-verify]`, `[objkey-verify]`, `[natwater-verify]`: 0 distintas | pelo 911 → 113 µs |
 | `dc_rot_yxz_n`, `dc_translate_n` (`pose_sh4.S`); `dc_los_axis` (`creature_sh4.S`); `dc_occ_add`, `dc_ui_corners` (`inst_sh4.S`) | Rotación y traslación de las pilas de matrices (Lara, cámara), LOS por ejes, pintado del búfer de oclusión, esquinas de la interfaz | `[rotn-verify]`, `[transn-verify]`, `[los-verify]`, `[occ-verify]`, `[ui-verify]`: 0 distintas | oclusión: era 0,46-0,7 ms en C |
 | `dc_cam_move`, `dc_cam_shift_clamp`, `dc_cam_los`, `dc_cam_collide` (`creature_sh4.S`) | Cámara: paso, ajuste a la caja (TR1-TR2), LOS y choque (TR3) | `[cammove-verify]`, `[camclamp-verify]`, `[camlos-verify]`, `[camcol-verify]`: 0 distintas | — |
+| `dc_cam_shift`, `dc_cam_clip`, `dc_cam_orbit`, `dc_cam_smart_shift` (`creature_sh4.S`) | Cámara TR1-TR2: shift, clip, órbita y SmartShift | `[smartshift-verify]`, `[orbit-verify]`, `[camshift-verify]` (autoprueba): 0 distintas | — |
+| `dc_cam3_move`, `dc_cam3_ideal`, `dc_cam3_target`, `dc_cam3_look_walk`, `dc_cam3_look_close` (`creature_sh4.S`) | Cámara TR3: paso, ideal, objetivo y Look | `[cam3move-verify]`, `[cam3ideal-verify]`, `[cam3target-verify]`, `[cam3walk-verify]`, `[cam3close-verify]` | — |
+| `dc_walk_bones` (`pose_sh4.S`) | Recorrido de huesos de los ítems (`Anim_Walk_Next` tras la raíz) | `[bones-verify]`: 0 distintos | — |
+| `dc_mulvec32` (`game_sh4.S`) | `Matrix_MulVec32_M` sin `__muldi3` | `[mulvec-verify]`: 0 distintas | — |
 Reglas del SH-4 que costaron tiempo:
 - Un inmediato (`add #n`, `mov #n`) va de -128 a 127: `add #128,r15` se ensambla como -128.
 - `mov.l @(disp,Rn)` llega a 60 bytes; `mov.b`/`mov.w @(disp,Rn)` solo con R0 y desplazamientos

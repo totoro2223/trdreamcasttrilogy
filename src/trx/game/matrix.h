@@ -101,6 +101,14 @@ void Matrix_Pop_I(void);
 bool Matrix_DC_WalkJoint(
     bool pop, bool push, XYZ_32 pos, const XYZ_16 *rot, const XYZ_16 *rot_far,
     bool interpolated);
+// Fills dc_walk_joint's block (13 words) for a walk of many joints in
+// assembly; false where the assembly does not apply.
+bool Matrix_DC_WalkJointReady(uint32_t *block);
+// For the verify builds: the stacks kept and put back (one slot), and the
+// four matrices on top.
+void Matrix_DC_SaveState(void);
+void Matrix_DC_LoadState(void);
+void Matrix_DC_Tops(MATRIX out[4]);
 #endif
 
 void Matrix_RotY_I(int16_t ang);

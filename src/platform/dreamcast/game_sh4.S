@@ -3648,3 +3648,80 @@ aif_box:
     .long   -16384
 .Lai_256:
     .long   256
+
+! int32_t dc_mulvec32(const MATRIX *m, const int32_t v[3], int32_t out[3]);
+! matrix.c Matrix_MulVec32_M: out[r] = (m[r][0..2] . v + m[r][3]) >> 14, the
+! sums in 64 bits and the low 32 bits of each result kept, as the C has them.
+! The entries are int64; returns 0 (out untouched) when one of the nine it
+! multiplies does not fit 32 bits, for the C to do. TRX_DC_ASMOFF3 bit
+! 134217728 turns it off.
+! r4 the row, r5 v, r6 out, r7 rows left; r0 r1 the sum (low, high).
+    .text
+    .align 2
+    .global _dc_mulvec32
+_dc_mulvec32:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov     r4,r1                   ! the nine entries fit 32 bits?
+    mov     #3,r7
+1:  mov     #3,r9
+2:  mov.l   @r1,r2                  ! low
+    mov.l   @(4,r1),r3              ! high
+    mov     r2,r8
+    shll    r8
+    subc    r8,r8                   ! the low word's sign: 0 or -1
+    cmp/eq  r3,r8
+    bf      mv_no
+    dt      r9
+    bf/s    2b
+    add     #8,r1
+    dt      r7
+    bf/s    1b
+    add     #8,r1                   ! past the translation
+    mov     #3,r7
+mv_row:
+    mov.l   @(24,r4),r0             ! the translation, low and high
+    mov.l   @(28,r4),r1
+    mov.l   @r4,r2
+    mov.l   @r5,r3
+    dmuls.l r2,r3
+    sts     macl,r8
+    sts     mach,r9
+    clrt
+    addc    r8,r0
+    addc    r9,r1
+    mov.l   @(8,r4),r2
+    mov.l   @(4,r5),r3
+    dmuls.l r2,r3
+    sts     macl,r8
+    sts     mach,r9
+    clrt
+    addc    r8,r0
+    addc    r9,r1
+    mov.l   @(16,r4),r2
+    mov.l   @(8,r5),r3
+    dmuls.l r2,r3
+    sts     macl,r8
+    sts     mach,r9
+    clrt
+    addc    r8,r0
+    addc    r9,r1
+    mov     #-14,r2
+    shld    r2,r0
+    mov     #18,r2
+    shld    r2,r1
+    or      r1,r0
+    mov.l   r0,@r6
+    add     #4,r6
+    dt      r7
+    bf/s    mv_row
+    add     #32,r4
+    mov     #1,r0
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+mv_no:
+    mov     #0,r0
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8

@@ -1059,3 +1059,155 @@ _dc_translate_n:
     .align 2
 .Ltn_rel:
     .long   _dc_translate_rel
+
+! void dc_walk_bones(const M_WALK_BONES *b);   anims/walk.c Anim_Walk_Next
+! The joints first..last of an object's walk: each bone through dc_walk_joint,
+! the depth counted, its extra rotations (Y, X, Z) through the C's Matrix_Rot*,
+! then the caller's draw for the joint. TRX_DC_ASMOFF3 bit 67108864 turns it
+! off.
+! Block: 0 dc_walk_joint's block 4 bones (ANIM_BONE, 17 bytes: pop, push,
+! rot x y z, pos packed) 8 rots_a 12 rots_b 16 &extra_rotation 20 first
+! 24 last 28 interpolated 32 rot y 36 rot x 40 rot z 44 draw(ctx, joint)
+! 48 ctx 52 &depth.
+! r8 the block, r9 the joint's block, r10 the joint, r11 its bone, r12 last,
+! r13 the extra rotations, r14 the flags every joint has.
+    .text
+    .align 2
+    .global _dc_walk_bones
+_dc_walk_bones:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    mov     r4,r8
+    mov.l   @r8,r9
+    mov.l   @(20,r8),r10
+    mov.l   @(24,r8),r12
+    mov.l   @(28,r8),r14
+    shll2   r14                     ! interpolated: 4
+    mov.l   @(8,r8),r0
+    tst     r0,r0
+    bt      1f
+    add     #8,r14                  ! rotations: 8
+1:  mov     r10,r0                  ! the bone: bones + (joint - 1) * 17
+    add     #-1,r0
+    mov     r0,r1
+    shll2   r1
+    shll2   r1
+    add     r0,r1
+    mov.l   @(4,r8),r11
+    add     r1,r11
+wb_loop:
+    cmp/gt  r12,r10
+    bt      wb_done
+    mov.b   @r11,r0                 ! flags: pop 1, push 2
+    mov     r0,r1
+    mov.b   @(1,r11),r0
+    shll    r0
+    or      r0,r1
+    or      r14,r1
+    mov.l   r1,@(24,r9)
+    mov     r11,r2                  ! the offset, packed at 5
+    add     #5,r2
+    mov     #28,r7
+2:  mov.b   @r2+,r0
+    extu.b  r0,r3
+    mov.b   @r2+,r0
+    extu.b  r0,r0
+    shll8   r0
+    or      r0,r3
+    mov.b   @r2+,r0
+    extu.b  r0,r0
+    shll16  r0
+    or      r0,r3
+    mov.b   @r2+,r0
+    shll16  r0
+    shll8   r0
+    or      r0,r3
+    mov     r7,r0
+    mov.l   r3,@(r0,r9)
+    add     #4,r7
+    mov     #40,r0
+    cmp/ge  r0,r7
+    bf      2b
+    mov.l   @(8,r8),r2              ! rots + joint * 6
+    tst     r2,r2
+    bt      3f
+    mov     r10,r1
+    shll    r1
+    mov     r1,r0
+    shll    r0
+    add     r0,r1
+    add     r1,r2
+    mov.l   @(12,r8),r3
+    add     r1,r3
+    bra     4f
+    nop
+3:  mov     #0,r3
+4:  mov.l   r2,@(40,r9)
+    mov.l   r3,@(44,r9)
+    mov     r9,r4
+    mov.l   .Lwb_joint,r1
+    jsr     @r1
+    nop
+    mov.l   @(52,r8),r1             ! depth += push - pop
+    mov.l   @r1,r2
+    mov.b   @(1,r11),r0
+    add     r0,r2
+    mov.b   @r11,r0
+    sub     r0,r2
+    mov.l   r2,@r1
+    mov.l   @(16,r8),r1             ! the extra rotations
+    mov.l   @r1,r13
+    tst     r13,r13
+    bt      wb_draw
+    mov.b   @(3,r11),r0
+    tst     r0,r0
+    bt      5f
+    mov.w   @r13+,r4
+    mov.l   @(32,r8),r1
+    jsr     @r1
+    nop
+5:  mov.b   @(2,r11),r0
+    tst     r0,r0
+    bt      6f
+    mov.w   @r13+,r4
+    mov.l   @(36,r8),r1
+    jsr     @r1
+    nop
+6:  mov.b   @(4,r11),r0
+    tst     r0,r0
+    bt      7f
+    mov.w   @r13+,r4
+    mov.l   @(40,r8),r1
+    jsr     @r1
+    nop
+7:  mov.l   @(16,r8),r1
+    mov.l   r13,@r1
+wb_draw:
+    mov.l   @(48,r8),r4
+    mov     r10,r5
+    mov.l   @(44,r8),r1
+    jsr     @r1
+    nop
+    add     #1,r10
+    bra     wb_loop
+    add     #17,r11
+wb_done:
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lwb_joint:
+    .long   _dc_walk_joint
