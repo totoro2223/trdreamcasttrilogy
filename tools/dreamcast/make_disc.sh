@@ -258,8 +258,8 @@ done
 # Optional extras that cost memory in every level.
 #   scripts/bignasty  the BFG9000 easter egg (its script and models)
 rm -rf "$STAGE/scripts/bignasty"
-if [ -n "${TRX_DC_DEMO:-}" ]; then
-  # A test disc: the title shows its next demo after a second, not thirty.
+if [ -n "${TRX_DC_DEMO:-}" ] && [ -f "$STAGE/modules/ui/ring/screen.lua" ]; then
+  # A test disc (the Lua build: the build without it has no such screen): the title shows its next demo after a second, not thirty.
   sed -i 's|(delay_ok and delay or 0) \* trx.game.LOGIC_FPS|1 * trx.game.LOGIC_FPS|'     "$STAGE/modules/ui/ring/screen.lua"
 fi
 

@@ -949,3 +949,113 @@ wj_end:
     .long   _dc_mat_copy
 .Lwj_trans:
     .long   _dc_translate_rel
+
+! void dc_rot_yxz_n(MATRIX *const *ms, int32_t n, const XYZ_16 *rot,
+!                   int32_t (*sin)(int32_t));
+! matrix.c M_RotYXZ_N's integer path (both stacks, not the world one alone):
+! about Y, then X, then Z, each axis left alone when its angle is 0, every
+! matrix by dc_rot_y/x/z with the sine and the cosine (the sine 90 degrees on)
+! from the table's routine (dc_sin, or dc_sin_coarse for TR3).
+    .macro RYXZ_AXIS off, fn
+    mov.w   @(\off,r10),r0          ! the angle, as Math_Sin gets it
+    tst     r0,r0
+    bt      77f
+    mov     r0,r12
+    mov.l   @r15,r1
+    jsr     @r1
+    mov     r12,r4
+    mov     r0,r13                  ! sine
+    mov.l   .Lry_q,r1
+    mov     r12,r4
+    add     r1,r4
+    mov.l   @r15,r1
+    jsr     @r1
+    nop
+    mov     r0,r14                  ! cosine
+    mov     r8,r12
+    mov     r9,r11
+    cmp/pl  r11
+    bf      77f
+76: mov.l   @r12+,r4
+    mov     r13,r5
+    mov.l   \fn,r1
+    jsr     @r1
+    mov     r14,r6
+    dt      r11
+    bf      76b
+77:
+    .endm
+
+    .text
+    .align 2
+    .global _dc_rot_yxz_n
+_dc_rot_yxz_n:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    mov.l   r7,@-r15                ! the sine's routine
+    mov     r4,r8
+    mov     r5,r9
+    mov     r6,r10
+    RYXZ_AXIS 2, .Lry_y
+    RYXZ_AXIS 0, .Lry_x
+    RYXZ_AXIS 4, .Lry_z
+    add     #4,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lry_q:
+    .long   16384
+.Lry_y:
+    .long   _dc_rot_y
+.Lry_x:
+    .long   _dc_rot_x
+.Lry_z:
+    .long   _dc_rot_z
+
+! void dc_translate_n(MATRIX *const *ms, int32_t n, const int32_t xyz[3]);
+! matrix.c Matrix_TranslateRel32_I / _ID with one offset: dc_translate_rel on
+! each of the n matrices.
+    .text
+    .align 2
+    .global _dc_translate_n
+_dc_translate_n:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    sts.l   pr,@-r15
+    mov     r4,r8
+    mov     r5,r9
+    mov     r6,r10
+    cmp/pl  r9
+    bf      2f
+1:  mov.l   @r8+,r4
+    mov.l   @r10,r5
+    mov.l   @(4,r10),r6
+    mov.l   .Ltn_rel,r1
+    jsr     @r1
+    mov.l   @(8,r10),r7
+    dt      r9
+    bf      1b
+2:  lds.l   @r15+,pr
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Ltn_rel:
+    .long   _dc_translate_rel

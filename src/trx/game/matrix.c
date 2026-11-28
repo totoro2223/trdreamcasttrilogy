@@ -1017,6 +1017,19 @@ static void M_RotYXZ_Float(
 
 #endif
 
+static void M_RotYXZ_NC(MATRIX *const *ms, int32_t n, XYZ_16 rotation);
+
+#if defined(__DREAMCAST__)
+// In assembly (pose_sh4.S, dc_rot_yxz_n): the integer path, where the sine's
+// and the rotations' routines are the assembly ones the C would call
+// (TRX_DC_ASMOFF3 bit 262144 turns it off).
+extern void dc_rot_yxz_n(
+    MATRIX *const *ms, int32_t n, const XYZ_16 *rot, int32_t (*sin)(int32_t));
+extern int32_t dc_sin(int32_t angle);
+extern int32_t dc_sin_coarse(int32_t angle);
+extern uint32_t g_DC_AsmOff3;
+#endif
+
 static void M_RotYXZ_N(
     MATRIX *const *const ms, const int32_t n, const XYZ_16 rotation)
 {
@@ -1025,7 +1038,44 @@ static void M_RotYXZ_N(
         M_RotYXZ_Float(ms, n, rotation);
         return;
     }
+    const bool coarse = Math_IsCoarseTrig();
+    if ((g_DC_AsmOff3 & 262144) == 0 && (g_DC_AsmOff & 67108864) == 0
+        && (g_DC_AsmOff2 & (coarse ? 8192 : 32)) == 0 && n <= 4) {
+    #if defined(DC_EMIT_VERIFY)
+        MATRIX ref[4];
+        MATRIX *ref_ptrs[4];
+        for (int32_t i = 0; i < n; i++) {
+            ref[i] = *ms[i];
+            ref_ptrs[i] = &ref[i];
+        }
+        M_RotYXZ_NC(ref_ptrs, n, rotation);
+    #endif
+        dc_rot_yxz_n(ms, n, &rotation, coarse ? dc_sin_coarse : dc_sin);
+    #if defined(DC_EMIT_VERIFY)
+        static uint32_t runs;
+        static uint32_t bad;
+        for (int32_t i = 0; i < n; i++) {
+            if (memcmp(&ref[i], ms[i], sizeof(MATRIX)) != 0 && bad++ < 6) {
+                LOG_WARNING(
+                    "[rotn-verify] MISMATCH rot %d %d %d matrix %d",
+                    rotation.x, rotation.y, rotation.z, (int)i);
+            }
+        }
+        if (++runs % 20000 == 0) {
+            LOG_WARNING(
+                "[rotn-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+    #endif
+        return;
+    }
 #endif
+    M_RotYXZ_NC(ms, n, rotation);
+}
+
+static void M_RotYXZ_NC(
+    MATRIX *const *const ms, const int32_t n, const XYZ_16 rotation)
+{
     if (rotation.y != 0) {
         const int32_t s = Math_Sin(rotation.y);
         const int32_t c = Math_Cos(rotation.y);
@@ -1741,8 +1791,47 @@ void Matrix_TranslateRel16_I(const XYZ_16 offset)
     Matrix_TranslateRel32_I(XYZ_32_From16(offset));
 }
 
+#if defined(__DREAMCAST__)
+// In assembly (pose_sh4.S, dc_translate_n): the matrices' translation by one
+// offset, where dc_translate_rel is what the C calls (TRX_DC_ASMOFF3 bit
+// 4194304 turns it off).
+extern void dc_translate_n(MATRIX *const *ms, int32_t n, const int32_t xyz[3]);
+#endif
+
 void Matrix_TranslateRel32_I(const XYZ_32 offset)
 {
+#if defined(__DREAMCAST__)
+    if ((g_DC_AsmOff3 & 4194304) == 0 && (g_DC_AsmOff & 67108864) == 0) {
+        MATRIX *const ms[4] = {
+            g_WMatrixPtr, m_WIMMatrixPtr, g_MatrixPtr, m_IMMatrixPtr
+        };
+        const int32_t xyz[3] = { offset.x, offset.y, offset.z };
+    #if defined(DC_EMIT_VERIFY)
+        const int32_t n = g_MatrixWorldOnly ? 2 : 4;
+        MATRIX ref[4];
+        for (int32_t i = 0; i < n; i++) {
+            ref[i] = *ms[i];
+            M_TranslateRel_C(&ref[i], offset);
+        }
+        dc_translate_n(ms, n, xyz);
+        static uint32_t runs;
+        static uint32_t bad;
+        for (int32_t i = 0; i < n; i++) {
+            if (memcmp(&ref[i], ms[i], sizeof(MATRIX)) != 0 && bad++ < 6) {
+                LOG_WARNING("[transn-verify] MISMATCH matrix %d", (int)i);
+            }
+        }
+        if (++runs % 20000 == 0) {
+            LOG_WARNING(
+                "[transn-verify] %u runs, %u bad", (unsigned)runs,
+                (unsigned)bad);
+        }
+    #else
+        dc_translate_n(ms, g_MatrixWorldOnly ? 2 : 4, xyz);
+    #endif
+        return;
+    }
+#endif
     if (!g_MatrixWorldOnly) {
         M_TranslateRel(g_MatrixPtr, offset);
         M_TranslateRel(m_IMMatrixPtr, offset);

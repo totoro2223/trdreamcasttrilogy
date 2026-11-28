@@ -4928,7 +4928,8 @@ bool DC_Occl_PortalHidden(
 // Paints a triangle (cell space: a cell's centre at whole numbers; w: 1 / z
 // at its corners) into the cells whose centres it covers, within the clip
 // (cells, inclusive: painting fewer cells never hides more).
-static void M_OccTri(
+// Without fmac contraction: dc_occ_add (inst_sh4.S) rounds as this does.
+__attribute__((optimize("fp-contract=off"))) static void M_OccTri(
     const float p[3][2], const float w[3], const int32_t clip[4])
 {
     const int32_t y0 =
@@ -5066,7 +5067,35 @@ static void M_OcclBuild(M_BINDING *const bind, const OUTPUT_MESH *const mesh)
 
 // The room's big opaque triangles facing the camera, within its window
 // (m: the game's matrix with the room's position).
-void DC_MeshBatcher_OcclAddRoom(
+// In assembly (inst_sh4.S, dc_occ_add): the painting below; TRX_DC_ASMOFF3
+// bit 1048576 turns it off.
+typedef struct {
+    const float (*pos)[3];
+    int32_t vertices;
+    const uint16_t *tris;
+    int32_t triangles;
+    float (*pts)[3];
+    uint8_t *outs;
+    float win[4];
+    int32_t clip[4];
+    float kx;
+    float ky;
+    float bx;
+    float by;
+    float (*buffer)[M_OCC_W];
+    float near;
+} M_OCC_ADD;
+_Static_assert(offsetof(M_OCC_ADD, win) == 24, "dc_occ_add");
+_Static_assert(offsetof(M_OCC_ADD, clip) == 40, "dc_occ_add");
+_Static_assert(offsetof(M_OCC_ADD, kx) == 56, "dc_occ_add");
+_Static_assert(offsetof(M_OCC_ADD, buffer) == 72, "dc_occ_add");
+_Static_assert(offsetof(M_OCC_ADD, near) == 76, "dc_occ_add");
+extern void dc_occ_add(const M_OCC_ADD *b);
+static void M_OcclAddC(
+    const M_BINDING *bind, const float win[4], const int32_t clip[4], float kx,
+    float ky, float bx, float by, float (*pts)[3], uint8_t *outs);
+
+__attribute__((optimize("fp-contract=off"))) void DC_MeshBatcher_OcclAddRoom(
     const MESH_BATCHER *const batcher, const OUTPUT_MESH *const mesh,
     const MATRIX *const m, const int32_t left, const int32_t top,
     const int32_t right, const int32_t bottom)
@@ -5127,6 +5156,61 @@ void DC_MeshBatcher_OcclAddRoom(
     // side is let go by its corners' bits alone.
     static float pts[M_OCC_MAX_VERTICES][3];
     static uint8_t outs[M_OCC_MAX_VERTICES];
+    if ((g_DC_AsmOff3 & 1048576) == 0) {
+        const M_OCC_ADD b = {
+            .pos = (const float(*)[3])bind->occ_pos,
+            .vertices = bind->occ_vertex_count,
+            .tris = bind->occ_tris,
+            .triangles = bind->occ_count,
+            .pts = pts,
+            .outs = outs,
+            .win = { win[0], win[1], win[2], win[3] },
+            .clip = { clip[0], clip[1], clip[2], clip[3] },
+            .kx = kx,
+            .ky = ky,
+            .bx = bx,
+            .by = by,
+            .buffer = m_OccW,
+            .near = M_OCC_NEAR,
+        };
+    #if defined(DC_EMIT_VERIFY)
+        static float before[M_OCC_H][M_OCC_W];
+        static float got[M_OCC_H][M_OCC_W];
+        memcpy(before, m_OccW, sizeof(m_OccW));
+        dc_occ_add(&b);
+        memcpy(got, m_OccW, sizeof(m_OccW));
+        memcpy(m_OccW, before, sizeof(m_OccW));
+        M_OcclAddC(bind, win, clip, kx, ky, bx, by, pts, outs);
+        static uint32_t runs;
+        static uint32_t bad;
+        if (memcmp(got, m_OccW, sizeof(got)) != 0 && bad++ < 6) {
+            int32_t cells = 0;
+            for (int32_t y = 0; y < M_OCC_H; y++) {
+                for (int32_t x = 0; x < M_OCC_W; x++) {
+                    cells += got[y][x] != m_OccW[y][x];
+                }
+            }
+            LOG_WARNING("[occ-verify] MISMATCH %d cells", cells);
+        }
+        if (++runs % 500 == 0) {
+            LOG_WARNING("[occ-verify] %u rooms, %u bad", (unsigned)runs, (unsigned)bad);
+        }
+    #else
+        dc_occ_add(&b);
+    #endif
+    } else {
+        M_OcclAddC(bind, win, clip, kx, ky, bx, by, pts, outs);
+    }
+    mat_load(&keep);
+    g_DC_OccStats[4] += (uint32_t)(timer_us_gettime64() - a0); // TEMP
+}
+
+// The C of dc_occ_add, its reference (XMTRX holds the room's matrix).
+__attribute__((optimize("fp-contract=off"))) static void M_OcclAddC(
+    const M_BINDING *const bind, const float win[4], const int32_t clip[4],
+    const float kx, const float ky, const float bx, const float by,
+    float (*const pts)[3], uint8_t *const outs)
+{
     for (int32_t i = 0; i < bind->occ_vertex_count; i++) {
         float xv = bind->occ_pos[i][0];
         float yv = bind->occ_pos[i][1];
@@ -5171,9 +5255,7 @@ void DC_MeshBatcher_OcclAddRoom(
         const float w[3] = { pts[tri[0]][2], pts[tri[1]][2], pts[tri[2]][2] };
         M_OccTri(p, w, clip);
     }
-    mat_load(&keep);
     g_DC_OccStats[5] += (uint32_t)(timer_us_gettime64() - t0); // TEMP
-    g_DC_OccStats[4] += (uint32_t)(timer_us_gettime64() - a0); // TEMP
 }
 
 // Picks the chunks of a room that show, and gathers their faces into the

@@ -6,6 +6,7 @@
     #define DC_PROBE(i, stmt) stmt
 #endif
 
+#include <trx/core/log.h>
 #include <trx/core/utils.h>
 #include <trx/game/items.h>
 #include <trx/game/matrix.h>
@@ -85,7 +86,7 @@ static int32_t M_ApplySlope(const int32_t slope, const int32_t delta)
     return ((int64_t)slope * delta) >> WALL_SHIFT;
 }
 
-static int32_t M_CheckX(
+static int32_t M_CheckXC(
     const GAME_VECTOR *const start, GAME_VECTOR *const target)
 {
     const int32_t dx = target->x - start->x;
@@ -195,7 +196,7 @@ static int32_t M_CheckX(
     return 1;
 }
 
-static int32_t M_CheckZ(
+static int32_t M_CheckZC(
     const GAME_VECTOR *const start, GAME_VECTOR *const target)
 {
     const int32_t dz = target->z - start->z;
@@ -304,6 +305,105 @@ static int32_t M_CheckZ(
     target->room_num = room_num;
     return 1;
 }
+
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_los_axis): the walk along one axis, with
+// these two for the floor data and the rooms passed. TRX_DC_ASMOFF3 bit
+// 524288 turns it off; the C above is its reference.
+typedef struct {
+    const GAME_VECTOR *start;
+    GAME_VECTOR *target;
+    int32_t along;
+    int32_t across;
+    int32_t (*blocked)(int32_t x, int32_t y, int32_t z, int16_t *room);
+    void (*push)(int32_t room);
+} M_LOS_AXIS;
+extern int32_t dc_los_axis(const M_LOS_AXIS *b);
+extern uint32_t g_DC_AsmOff3;
+
+static int32_t M_Blocked(
+    const int32_t x, const int32_t y, const int32_t z, int16_t *const room)
+{
+    const XYZ_32 pos = { .x = x, .y = y, .z = z };
+    const SECTOR *const sector = Room_GetSector(pos, room);
+    const int32_t height = Room_GetHeight(sector, pos);
+    const int32_t ceiling = Room_GetCeiling(sector, pos);
+    return y > height || y < ceiling;
+}
+
+static void M_Push(const int32_t room)
+{
+    M_TryPushLOSRoom((int16_t)room);
+}
+
+static int32_t M_CheckAxis(
+    const GAME_VECTOR *const start, GAME_VECTOR *const target, const bool z,
+    int32_t (*const ref)(const GAME_VECTOR *, GAME_VECTOR *))
+{
+    if ((g_DC_AsmOff3 & 524288) != 0) {
+        return ref(start, target);
+    }
+    #if defined(DC_EMIT_VERIFY)
+    GAME_VECTOR want = *target;
+    const GAME_VECTOR target_in = *target;
+    const int32_t want_r = ref(start, &want);
+    int32_t want_rooms[M_MAX_LOS_ROOMS];
+    memcpy(want_rooms, m_LOSRooms, sizeof(want_rooms));
+    const int32_t want_n = m_LOSNumRooms;
+    *target = target_in;
+    #endif
+    // No run along the axis: clear, and the rooms passed left as they were.
+    int32_t r = 1;
+    if ((z ? target->z - start->z : target->x - start->x) != 0) {
+        M_ResetLOSRooms(start->room_num);
+        const M_LOS_AXIS b = {
+            .start = start,
+            .target = target,
+            .along = z ? 8 : 0,
+            .across = z ? 0 : 8,
+            .blocked = M_Blocked,
+            .push = M_Push,
+        };
+        r = dc_los_axis(&b);
+        if (r == 2) {
+            r = ref(start, target);
+        }
+    }
+    #if defined(DC_EMIT_VERIFY)
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((r != want_r || target->x != want.x || target->y != want.y
+         || target->z != want.z || target->room_num != want.room_num
+         || m_LOSNumRooms != want_n
+         || memcmp(m_LOSRooms, want_rooms, sizeof(int32_t) * want_n) != 0)
+        && bad++ < 6) {
+        LOG_WARNING(
+            "[los-verify] MISMATCH axis %d r %d/%d pos %d %d %d / %d %d %d "
+            "room %d/%d rooms %d/%d",
+            (int)z, r, want_r, target->x, target->y, target->z, want.x,
+            want.y, want.z, target->room_num, want.room_num, m_LOSNumRooms,
+            want_n);
+    }
+    if (++runs % 2000 == 0) {
+        LOG_WARNING("[los-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    #endif
+    return r;
+}
+
+static int32_t M_CheckX(const GAME_VECTOR *const start, GAME_VECTOR *const target)
+{
+    return M_CheckAxis(start, target, false, M_CheckXC);
+}
+
+static int32_t M_CheckZ(const GAME_VECTOR *const start, GAME_VECTOR *const target)
+{
+    return M_CheckAxis(start, target, true, M_CheckZC);
+}
+#else
+    #define M_CheckX M_CheckXC
+    #define M_CheckZ M_CheckZC
+#endif
 
 static int32_t M_ClipTargetSimple(
     const GAME_VECTOR *const start, GAME_VECTOR *const target)

@@ -944,3 +944,572 @@ _dc_obj_key:
     .long   2166136261
 .Lokp:
     .long   16777619
+
+! void dc_occ_add(const M_OCC_ADD *b);   batcher.c DC_MeshBatcher_OcclAddRoom
+! The room's painting vertices through XMTRX (loaded by the C) to cells and
+! 1 / z, with the window's side bits (16: too near); then its triangles that
+! face the camera and are not wholly to one side painted (M_OccTri): each
+! cell whose centre a triangle covers keeps the larger of its 1 / z and the
+! face's, the plane's value at the cell less half a cell's fall, no less than
+! the face's farthest corner. The C is built without fmac contraction, so the
+! two round alike.
+! Block: 0 pos (float[3]) 4 vertices 8 tris (uint16 by threes) 12 triangles
+! 16 pts (float[3]) 20 outs (uint8) 24 28 32 36 the window (cells: left top
+! right bottom) 40 44 48 52 the clip (cells, ints) 56 kx 60 ky 64 bx 68 by
+! 72 the buffer (float[24][32]) 76 the near z.
+! Frame (r14): 0 y1.
+    .text
+    .align 2
+    .global _dc_occ_add
+_dc_occ_add:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    fmov.s  fr12,@-r15
+    fmov.s  fr13,@-r15
+    fmov.s  fr14,@-r15
+    fmov.s  fr15,@-r15
+    add     #-8,r15
+    mov     r15,r14
+    mov     r4,r8
+    ! fr4 near, fr5 kx, fr6 ky, fr7 bx, fr8 by, fr9 left, fr10 top,
+    ! fr11 right, fr3 bottom.
+    mov     #76,r0
+    fmov.s  @(r0,r8),fr4
+    mov     #56,r0
+    fmov.s  @(r0,r8),fr5
+    add     #4,r0
+    fmov.s  @(r0,r8),fr6
+    add     #4,r0
+    fmov.s  @(r0,r8),fr7
+    add     #4,r0
+    fmov.s  @(r0,r8),fr8
+    mov     #24,r0
+    fmov.s  @(r0,r8),fr9
+    add     #4,r0
+    fmov.s  @(r0,r8),fr10
+    add     #4,r0
+    fmov.s  @(r0,r8),fr11
+    mov     #36,r0
+    fmov.s  @(r0,r8),fr3
+    mov.l   @(0,r8),r1
+    mov.l   @(4,r8),r2
+    mov.l   @(16,r8),r3
+    mov.l   @(20,r8),r5
+    cmp/pl  r2
+    bf      oa_tris
+oa_vert:
+    fmov.s  @r1+,fr12
+    fmov.s  @r1+,fr13
+    fmov.s  @r1+,fr14
+    fldi1   fr15
+    ftrv    xmtrx,fv12
+    fcmp/gt fr14,fr4                ! nearer than the near z
+    bf      1f
+    mov     #16,r0
+    mov.b   r0,@r5
+    add     #12,r3
+    bra     2f
+    add     #1,r5
+1:  fldi1   fr0
+    fdiv    fr14,fr0                ! w
+    fmul    fr0,fr12
+    fmul    fr5,fr12
+    fmov    fr7,fr1
+    fadd    fr12,fr1                ! x = bx + xv * w * kx
+    fmul    fr0,fr13
+    fmul    fr6,fr13
+    fmov    fr8,fr2
+    fadd    fr13,fr2                ! y
+    fmov.s  fr1,@r3
+    add     #4,r3
+    fmov.s  fr2,@r3
+    add     #4,r3
+    fmov.s  fr0,@r3
+    add     #4,r3
+    fcmp/gt fr1,fr9                 ! x < left
+    movt    r6
+    fcmp/gt fr11,fr1                ! x > right
+    movt    r7
+    shll    r7
+    or      r7,r6
+    fcmp/gt fr2,fr10                ! y < top
+    movt    r7
+    shll2   r7
+    or      r7,r6
+    fcmp/gt fr3,fr2                 ! y > bottom
+    movt    r7
+    shll2   r7
+    shll    r7
+    or      r7,r6
+    mov.b   r6,@r5
+    add     #1,r5
+2:  dt      r2
+    bf      oa_vert
+oa_tris:
+    mov.l   @(8,r8),r9
+    mov.l   @(12,r8),r10
+    mov.l   @(16,r8),r11
+    mov.l   @(20,r8),r12
+    mov     #72,r0
+    mov.l   @(r0,r8),r13
+oa_tri:
+    cmp/pl  r10
+    bt      1f
+    bra     oa_end
+    nop
+1:  mov.w   @r9,r0
+    extu.w  r0,r0
+    mov     r0,r4
+    mov.b   @(r0,r12),r1
+    mov.w   @(2,r9),r0
+    extu.w  r0,r0
+    mov     r0,r5
+    mov.b   @(r0,r12),r2
+    mov.w   @(4,r9),r0
+    extu.w  r0,r0
+    mov     r0,r6
+    mov.b   @(r0,r12),r3
+    mov     r1,r0
+    or      r2,r0
+    or      r3,r0
+    tst     #16,r0
+    bf      oa_next
+    mov     r1,r0
+    and     r2,r0
+    and     r3,r0
+    extu.b  r0,r0
+    tst     r0,r0
+    bf      oa_next
+    ! The corners' points: index * 12.
+    mov     r4,r0
+    shll2   r4
+    shll    r0
+    shll2   r0
+    add     r0,r4
+    add     r11,r4
+    mov     r5,r0
+    shll2   r5
+    shll    r0
+    shll2   r0
+    add     r0,r5
+    add     r11,r5
+    mov     r6,r0
+    shll2   r6
+    shll    r0
+    shll2   r0
+    add     r0,r6
+    add     r11,r6
+    ! Facing the camera: (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0) < 0.
+    fmov.s  @r4,fr4
+    fmov.s  @r5,fr5
+    fmov.s  @r6,fr6
+    mov     #4,r0
+    fmov.s  @(r0,r4),fr1
+    fmov.s  @(r0,r5),fr2
+    fmov.s  @(r0,r6),fr3
+    fmov    fr5,fr7
+    fsub    fr4,fr7                 ! ex1
+    fmov    fr2,fr8
+    fsub    fr1,fr8                 ! ey1
+    fmov    fr6,fr9
+    fsub    fr4,fr9                 ! ex2
+    fmov    fr3,fr10
+    fsub    fr1,fr10                ! ey2
+    fmov    fr7,fr11
+    fmul    fr10,fr11
+    fmov    fr9,fr0
+    fmul    fr8,fr0
+    fsub    fr0,fr11                ! the cross product, the det below
+    fldi0   fr0
+    fcmp/gt fr11,fr0
+    bt      oa_paint
+oa_next:
+    add     #6,r9
+    bra     oa_tri
+    add     #-1,r10
+
+    ! M_OccTri. fr1 fr2 fr3: the corners' y; fr4 fr5 fr6: their x;
+    ! fr7 ex1, fr8 ey1, fr9 ex2, fr10 ey2, fr11 det (not 0 here).
+oa_paint:
+    fmov    fr3,fr0                 ! ymin = MIN(y0, MIN(y1, y2))
+    fcmp/gt fr2,fr3
+    bf      1f
+    fmov    fr2,fr0
+1:  fcmp/gt fr1,fr0
+    bf      2f
+    fmov    fr1,fr0
+2:  fmov    fr3,fr12                ! ymax = MAX(y0, MAX(y1, y2))
+    fcmp/gt fr3,fr2
+    bf      3f
+    fmov    fr2,fr12
+3:  fcmp/gt fr12,fr1
+    bf      4f
+    fmov    fr1,fr12
+4:  ftrc    fr0,fpul                ! y0 = MAX(clip top, ceil(ymin))
+    sts     fpul,r1
+    float   fpul,fr13
+    fcmp/gt fr13,fr0
+    movt    r0
+    add     r0,r1
+    mov.l   @(44,r8),r0
+    cmp/gt  r1,r0
+    bf      5f
+    mov     r0,r1
+5:  ftrc    fr12,fpul               ! y1 = MIN(clip bottom, floor(ymax))
+    sts     fpul,r7
+    float   fpul,fr13
+    fcmp/gt fr12,fr13
+    movt    r0
+    sub     r0,r7
+    mov.l   @(52,r8),r0
+    cmp/gt  r0,r7
+    bf      6f
+    mov     r0,r7
+6:  cmp/gt  r7,r1
+    bt      oa_next
+    mov.l   r7,@(0,r14)
+    fldi1   fr0
+    fdiv    fr11,fr0
+    fmov    fr0,fr11                ! 1 / det
+    mov     #8,r0
+    fmov.s  @(r0,r4),fr12           ! w0
+    fmov.s  @(r0,r5),fr13           ! w1
+    fmov.s  @(r0,r6),fr14           ! w2
+    fmov    fr14,fr15               ! w_far = MIN(w0, MIN(w1, w2))
+    fcmp/gt fr13,fr14
+    bf      1f
+    fmov    fr13,fr15
+1:  fcmp/gt fr12,fr15
+    bf      2f
+    fmov    fr12,fr15
+2:  fmov.s  fr15,@-r15
+    fsub    fr12,fr13               ! dw1
+    fsub    fr12,fr14               ! dw2
+    fmov    fr13,fr0
+    fmul    fr10,fr0
+    fmov    fr14,fr15
+    fmul    fr8,fr15
+    fsub    fr15,fr0
+    fmul    fr11,fr0                ! gx
+    fmov    fr14,fr15
+    fmul    fr7,fr15
+    fmul    fr9,fr13
+    fsub    fr13,fr15
+    fmul    fr11,fr15               ! gy
+    fmov    fr0,fr13
+    fabs    fr13
+    fmov    fr15,fr14
+    fabs    fr14
+    fadd    fr14,fr13
+    mov.l   .Loa_half,r2
+    lds     r2,fpul
+    fsts    fpul,fr14
+    fmul    fr14,fr13               ! slack
+    fmov    fr0,fr9                 ! w_base = w0 - gx * x0 - gy * y0 - slack
+    fmul    fr4,fr9
+    fsub    fr9,fr12
+    fmov    fr15,fr9
+    fmul    fr1,fr9
+    fsub    fr9,fr12
+    fsub    fr13,fr12
+    fmov.s  fr0,@-r15
+    fmov.s  fr15,@-r15              ! @r15 gy, 4 gx, 8 w_far
+    mov     #4,r0                   ! the corners by y: a r4, b r5, c r6
+    fmov.s  @(r0,r5),fr1
+    fmov.s  @(r0,r4),fr2
+    fcmp/gt fr1,fr2
+    bf      1f
+    mov     r4,r2
+    mov     r5,r4
+    mov     r2,r5
+1:  fmov.s  @(r0,r6),fr1
+    fmov.s  @(r0,r5),fr2
+    fcmp/gt fr1,fr2
+    bf      2f
+    mov     r5,r2
+    mov     r6,r5
+    mov     r2,r6
+    fmov.s  @(r0,r5),fr1
+    fmov.s  @(r0,r4),fr2
+    fcmp/gt fr1,fr2
+    bf      2f
+    mov     r4,r2
+    mov     r5,r4
+    mov     r2,r5
+2:  fmov.s  @r4,fr4                 ! ax
+    fmov.s  @(r0,r4),fr5            ! ay
+    fmov.s  @r5,fr6                 ! bx
+    fmov.s  @(r0,r5),fr7            ! by
+    fmov.s  @r6,fr13                ! cx
+    fmov.s  @(r0,r6),fr14           ! cy
+    fmov    fr13,fr10
+    fsub    fr4,fr10
+    fmov    fr14,fr0
+    fsub    fr5,fr0
+    fdiv    fr0,fr10                ! s_ac
+    fldi0   fr8
+    fcmp/gt fr5,fr7
+    bf      3f
+    fmov    fr6,fr8
+    fsub    fr4,fr8
+    fmov    fr7,fr0
+    fsub    fr5,fr0
+    fdiv    fr0,fr8                 ! s_ab
+3:  fldi0   fr3
+    fcmp/gt fr7,fr14
+    bf      4f
+    fmov    fr13,fr3
+    fsub    fr6,fr3
+    fmov    fr14,fr0
+    fsub    fr7,fr0
+    fdiv    fr0,fr3                 ! s_bc
+4:  fmov.s  @r15+,fr9               ! gy
+    fmov.s  @r15+,fr15              ! gx
+    fmov.s  @r15+,fr11              ! w_far
+    lds     r1,fpul
+    float   fpul,fr14               ! fy
+    fmov    fr14,fr13
+    fsub    fr5,fr13
+    fmul    fr10,fr13
+    fmov    fr4,fr0
+    fadd    fr0,fr13                ! x_long = ax + (fy - ay) * s_ac
+    fmov    fr9,fr0
+    fmul    fr14,fr0
+    fadd    fr0,fr12                ! w_row = w_base + gy * fy
+    mov.l   @(0,r14),r7             ! y1
+    mov     r1,r3
+    shll2   r3
+    shll2   r3
+    shll2   r3
+    shll    r3
+    add     r13,r3                  ! the row
+oa_row:
+    fcmp/gt fr14,fr7                ! fy < by
+    bf      1f
+    fmov    fr14,fr1
+    fsub    fr5,fr1
+    fmul    fr8,fr1
+    fmov    fr4,fr2
+    bra     2f
+    fadd    fr1,fr2
+1:  fmov    fr14,fr1
+    fsub    fr7,fr1
+    fmul    fr3,fr1
+    fmov    fr6,fr2
+    fadd    fr1,fr2                 ! x_short
+2:  fmov    fr2,fr0                 ! lo = MIN(x_long, x_short)
+    fcmp/gt fr13,fr2
+    bf      3f
+    fmov    fr13,fr0
+3:  fmov    fr2,fr1                 ! hi = MAX(x_long, x_short)
+    fcmp/gt fr2,fr13
+    bf      4f
+    fmov    fr13,fr1
+4:  ftrc    fr0,fpul                ! x0 = MAX(clip left, ceil(lo))
+    sts     fpul,r2
+    float   fpul,fr2
+    fcmp/gt fr2,fr0
+    movt    r0
+    add     r0,r2
+    mov.l   @(40,r8),r6
+    cmp/gt  r2,r6
+    bf      5f
+    mov     r6,r2
+5:  ftrc    fr1,fpul                ! x1 = MIN(clip right, floor(hi))
+    sts     fpul,r4
+    float   fpul,fr2
+    fcmp/gt fr1,fr2
+    movt    r0
+    sub     r0,r4
+    mov.l   @(48,r8),r6
+    cmp/gt  r6,r4
+    bf      6f
+    mov     r6,r4
+6:  cmp/gt  r4,r2
+    bt      oa_rowend
+    lds     r2,fpul
+    float   fpul,fr0
+    fmul    fr15,fr0
+    fadd    fr12,fr0                ! cw = w_row + gx * x0
+    sub     r2,r4
+    add     #1,r4
+    mov     r2,r5
+    shll2   r5
+    add     r3,r5
+7:  fmov    fr11,fr1                ! MAX(cw, w_far)
+    fcmp/gt fr11,fr0
+    bf      8f
+    fmov    fr0,fr1
+8:  fmov.s  @r5,fr2
+    fcmp/gt fr2,fr1
+    bf      9f
+    fmov.s  fr1,@r5
+9:  add     #4,r5
+    dt      r4
+    bf/s    7b
+    fadd    fr15,fr0
+oa_rowend:
+    fldi1   fr0
+    fadd    fr0,fr14
+    fadd    fr10,fr13
+    fadd    fr9,fr12
+    add     #64,r3
+    add     #64,r3
+    add     #1,r1
+    cmp/gt  r7,r1
+    bf      oa_row
+    bra     oa_next
+    nop
+oa_end:
+    add     #8,r15
+    fmov.s  @r15+,fr15
+    fmov.s  @r15+,fr14
+    fmov.s  @r15+,fr13
+    fmov.s  @r15+,fr12
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Loa_half:
+    .long   0x3f000000
+
+! void dc_ui_corners(const M_UI_CORNERS *b);   ui.c StageSprite / StageQuad
+! The four corners of an interface sprite or quad (top left, top right,
+! bottom left, bottom right) to the PowerVR's vertices: the rectangle's
+! integer corners times the screen's scale, the depth worked out once, the
+! texture's corners (sprites), and the colours packed to ARGB: a sprite's
+! floats clamped to 0..1 and times 255 (M_PackF, its colours round the corners
+! tl tr br bl), a quad's bytes as they are (M_Pack8).
+! Block: 0 out (DC_PVR_VERTEX[4], 28 bytes each) 4 the rectangle (int32 x0
+! y0 x1 y1) 8 the colours 12 mode (0 sprite, 1 quad) 16 sx 20 sy 24 z 28 u0
+! 32 v0 36 u1 40 v1.
+    .macro UIC_PACKF off
+    mov     r7,r2
+    add     #\off,r2
+    mov     #0,r3
+    mov     #4,r1                   ! r g b a: shifted in, a last on top
+1:  fmov.s  @r2+,fr8
+    fldi0   fr9
+    fcmp/gt fr8,fr9                 ! below 0
+    bf      2f
+    bra     3f
+    fmov    fr9,fr8
+2:  fldi1   fr9
+    fcmp/gt fr9,fr8                 ! past 1
+    bf      3f
+    fmov    fr9,fr8
+3:  fmul    fr11,fr8
+    ftrc    fr8,fpul
+    sts     fpul,r0
+    shll8   r3
+    dt      r1
+    bf/s    1b
+    or      r0,r3
+    ! r3 = r << 24 | g << 16 | b << 8 | a: to a r g b.
+    mov     r3,r0
+    shlr8   r0                      ! r g b
+    shll16  r3
+    shll8   r3                      ! a, on top
+    or      r3,r0
+    .endm
+
+    .macro UIC_PACK8 off
+    mov.l   @(\off,r7),r3           ! a b g r, the bytes r g b a
+    mov.l   .Luic_ag,r1
+    and     r3,r1                   ! a and g in place
+    mov     r3,r0
+    shll16  r0
+    mov.l   .Luic_r,r2
+    and     r2,r0                   ! r, to bits 16-23
+    or      r0,r1
+    mov     r3,r0
+    shlr16  r0
+    extu.b  r0,r0                   ! b, to the bottom
+    or      r1,r0
+    .endm
+
+    .macro UIC_CORNER xr, yr, ur, vr, soff, qoff
+    fmov.s  \xr,@r5
+    add     #4,r5
+    fmov.s  \yr,@r5
+    add     #4,r5
+    fmov.s  fr10,@r5
+    add     #4,r5
+    tst     r6,r6
+    bf      4f
+    fmov.s  \ur,@r5
+    add     #4,r5
+    fmov.s  \vr,@r5
+    add     #4,r5
+    UIC_PACKF \soff
+    bra     5f
+    nop
+4:  add     #8,r5
+    UIC_PACK8 \qoff
+5:  mov.l   r0,@r5
+    add     #8,r5
+    .endm
+
+    .text
+    .align 2
+    .global _dc_ui_corners
+_dc_ui_corners:
+    mov.l   @(0,r4),r5
+    mov.l   @(4,r4),r1
+    mov.l   @(8,r4),r7
+    mov.l   @(12,r4),r6
+    mov     r4,r0
+    add     #16,r0
+    fmov.s  @r0+,fr8                ! sx
+    fmov.s  @r0+,fr9                ! sy
+    fmov.s  @r0+,fr10               ! z
+    fmov.s  @r0+,fr4                ! u0
+    fmov.s  @r0+,fr5                ! v0
+    fmov.s  @r0+,fr6                ! u1
+    fmov.s  @r0+,fr7                ! v1
+    mov.l   @r1,r2
+    lds     r2,fpul
+    float   fpul,fr0
+    fmul    fr8,fr0                 ! x0
+    mov.l   @(8,r1),r2
+    lds     r2,fpul
+    float   fpul,fr1
+    fmul    fr8,fr1                 ! x1
+    mov.l   @(4,r1),r2
+    lds     r2,fpul
+    float   fpul,fr2
+    fmul    fr9,fr2                 ! y0
+    mov.l   @(12,r1),r2
+    lds     r2,fpul
+    float   fpul,fr3
+    fmul    fr9,fr3                 ! y1
+    mov.l   .Luic_255,r2
+    lds     r2,fpul
+    fsts    fpul,fr11
+    UIC_CORNER fr0, fr2, fr4, fr5, 0, 0
+    UIC_CORNER fr1, fr2, fr6, fr5, 16, 4
+    UIC_CORNER fr0, fr3, fr4, fr7, 48, 8
+    UIC_CORNER fr1, fr3, fr6, fr7, 32, 12
+    rts
+    nop
+
+    .align 2
+.Luic_255:
+    .long   0x437f0000
+.Luic_ag:
+    .long   0xff00ff00
+.Luic_r:
+    .long   0x00ff0000

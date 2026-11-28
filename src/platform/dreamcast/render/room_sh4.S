@@ -198,6 +198,7 @@ fc_done:
 ! r4 / r5 as signed 32-bit numbers, the quotient truncated towards zero, in r0.
 ! The estimate is a single-precision division, brought exact in integers.
 ! Clobbers r1-r6, fr0, fr1.
+    .global sdiv32
 sdiv32:
     mov     r4,r6
     xor     r5,r6                       ! the sign of the result

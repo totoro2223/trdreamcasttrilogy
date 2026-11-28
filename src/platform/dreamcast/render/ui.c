@@ -9,6 +9,7 @@
 
 #include <platform/dreamcast/stub.h>
 #include <trx/config.h>
+#include <trx/core/log.h>
 #include <trx/core/math/const.h>
 #include <trx/core/math/func.h>
 #include <trx/core/memory.h>
@@ -28,6 +29,8 @@
 #include <trx/version.h>
 
 #include <math.h>
+#include <stddef.h>
+#include <string.h>
 
 #define M_RING_SEGMENTS 32
 
@@ -421,6 +424,55 @@ static void M_ToScreen(
     out->z = 1.0f - (z - OUTPUT_UI_NEAR_Z) / (OUTPUT_UI_FAR_Z - OUTPUT_UI_NEAR_Z);
 }
 
+// In assembly (inst_sh4.S, dc_ui_corners): a sprite's or a quad's four
+// corners; TRX_DC_ASMOFF3 bit 2097152 turns it off.
+typedef struct {
+    DC_PVR_VERTEX *out;
+    const int32_t *rect;
+    const void *colors;
+    int32_t mode;
+    float sx;
+    float sy;
+    float z;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+} M_UI_CORNERS;
+_Static_assert(sizeof(DC_PVR_VERTEX) == 28, "dc_ui_corners");
+_Static_assert(offsetof(OUTPUT_UI_SPRITE, y1) == 16, "dc_ui_corners");
+_Static_assert(offsetof(OUTPUT_UI_QUAD, tl) == 20, "dc_ui_corners");
+extern void dc_ui_corners(const M_UI_CORNERS *b);
+extern uint32_t g_DC_AsmOff3;
+
+static bool M_UICorners(
+    M_PRIM *const prim, const int32_t *const rect, const int32_t z,
+    const void *const colors, const int32_t mode, const float u0,
+    const float v0, const float u1, const float v1)
+{
+    if ((g_DC_AsmOff3 & 2097152) != 0) {
+        return false;
+    }
+    const VIEWPORT_RECT ui = Viewport_GetRect(VIEWPORT_UI);
+    const M_UI_CORNERS b = {
+        .out = prim->v,
+        .rect = rect,
+        .colors = colors,
+        .mode = mode,
+        .sx = ui.width > 0 ? DC_PVR_GetScreenWidth() / ui.width : 1.0f,
+        .sy = ui.height > 0 ? 480.0f / ui.height : 1.0f,
+        .z = 1.0f
+            - ((float)z - OUTPUT_UI_NEAR_Z)
+                / (OUTPUT_UI_FAR_Z - OUTPUT_UI_NEAR_Z),
+        .u0 = u0,
+        .v0 = v0,
+        .u1 = u1,
+        .v1 = v1,
+    };
+    dc_ui_corners(&b);
+    return true;
+}
+
 static void M_RenderBegin(const SCENE_SOURCE *const source)
 {
     M_PRIV *const p = &m_Priv;
@@ -546,6 +598,28 @@ static bool M_SnapLowRes(float *const lo, float *const hi, const uint16_t size)
     return pixels < texels;
 }
 
+#if defined(DC_EMIT_VERIFY)
+static void M_UIVerify(
+    const bool by_asm, const M_PRIM *const got, const M_PRIM *const want)
+{
+    if (!by_asm) {
+        return;
+    }
+    static uint32_t runs;
+    static uint32_t bad;
+    if (memcmp(got->v, want->v, sizeof(want->v)) != 0 && bad++ < 6) {
+        LOG_WARNING(
+            "[ui-verify] MISMATCH %08x %08x x %f/%f z %f/%f",
+            (unsigned)got->v[0].argb, (unsigned)want->v[0].argb,
+            (double)got->v[3].x, (double)want->v[3].x, (double)got->v[0].z,
+            (double)want->v[0].z);
+    }
+    if (++runs % 5000 == 0) {
+        LOG_WARNING("[ui-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+}
+#endif
+
 void OutputSource_UI_StageSprite(OUTPUT_UI_SPRITE sprite)
 {
     const bool front = M_TakeFront(&sprite.z);
@@ -559,18 +633,33 @@ void OutputSource_UI_StageSprite(OUTPUT_UI_SPRITE sprite)
     const float v1 = v0 + tex->height / 65536.0f;
 
     M_PRIM prim = { .page = tex->tex_page, .front = front };
+#if defined(DC_EMIT_VERIFY)
+    M_PRIM asm_prim = prim;
+    const bool by_asm = M_UICorners(
+        &asm_prim, &sprite.x0, sprite.z, sprite.color, 0, u0, v0, u1, v1);
+#else
+    const bool by_asm = M_UICorners(
+        &prim, &sprite.x0, sprite.z, sprite.color, 0, u0, v0, u1, v1);
+#endif
     const float x[4] = { sprite.x0, sprite.x1, sprite.x0, sprite.x1 };
     const float y[4] = { sprite.y0, sprite.y0, sprite.y1, sprite.y1 };
     const float u[4] = { u0, u1, u0, u1 };
     const float v[4] = { v0, v0, v1, v1 };
     // The sprite's colours go round the corners: tl, tr, br, bl.
     const int32_t color_idx[4] = { 0, 1, 3, 2 };
+#if defined(DC_EMIT_VERIFY)
     for (int32_t i = 0; i < 4; i++) {
+#else
+    for (int32_t i = 0; i < 4 && !by_asm; i++) {
+#endif
         M_ToScreen(x[i], y[i], sprite.z, &prim.v[i]);
         prim.v[i].u = u[i];
         prim.v[i].v = v[i];
         prim.v[i].argb = M_PackF(sprite.color[color_idx[i]]);
     }
+#if defined(DC_EMIT_VERIFY)
+    M_UIVerify(by_asm, &asm_prim, &prim);
+#endif
     if (DC_PVR_IsLowRes()) {
         prim.half = M_SnapLowRes(&prim.v[0].x, &prim.v[1].x, tex->width)
             | M_SnapLowRes(&prim.v[0].y, &prim.v[2].y, tex->height);
@@ -586,13 +675,28 @@ void OutputSource_UI_StageQuad(OUTPUT_UI_QUAD quad)
 {
     const bool front = M_TakeFront(&quad.z);
     M_PRIM prim = { .page = DC_PVR_NO_TEXTURE, .front = front };
+#if defined(DC_EMIT_VERIFY)
+    M_PRIM asm_prim = prim;
+    const bool by_asm = M_UICorners(
+        &asm_prim, &quad.x0, quad.z, &quad.tl, 1, 0.0f, 0.0f, 0.0f, 0.0f);
+#else
+    const bool by_asm = M_UICorners(
+        &prim, &quad.x0, quad.z, &quad.tl, 1, 0.0f, 0.0f, 0.0f, 0.0f);
+#endif
     const float x[4] = { quad.x0, quad.x1, quad.x0, quad.x1 };
     const float y[4] = { quad.y0, quad.y0, quad.y1, quad.y1 };
     const RGBA_8888 c[4] = { quad.tl, quad.tr, quad.bl, quad.br };
+#if defined(DC_EMIT_VERIFY)
     for (int32_t i = 0; i < 4; i++) {
+#else
+    for (int32_t i = 0; i < 4 && !by_asm; i++) {
+#endif
         M_ToScreen(x[i], y[i], quad.z, &prim.v[i]);
         prim.v[i].argb = M_Pack8(c[i]);
     }
+#if defined(DC_EMIT_VERIFY)
+    M_UIVerify(by_asm, &asm_prim, &prim);
+#endif
     Vector_Add(m_Priv.prims, &prim);
 }
 

@@ -1,9 +1,12 @@
 #include <trx/config.h>
+#include <trx/core/log.h>
 #include <trx/core/math.h>
 #include <trx/debug.h>
 #include <trx/game/camera.h>
 #include <trx/game/lara.h>
 #include <trx/game/rooms.h>
+
+#include <string.h>
 
 // clang-format off
 #define M_LOS_STEPS         8
@@ -74,7 +77,7 @@ static const CAMERA_LOOK_SETTINGS *M_GetLookSettingsFunc(const bool on_surface)
     return &m_LookSettings;
 }
 
-static bool M_LOS(
+static bool M_LOSC(
     GAME_VECTOR *const start, GAME_VECTOR *const target, const int32_t shift)
 {
     const XYZ_32 delta = {
@@ -155,6 +158,82 @@ static bool M_LOS(
     return !clipped;
 }
 
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_cam_los and dc_cam_collide); the C above is
+// their reference. TRX_DC_ASMOFF3 bit 8388608 turns them off.
+typedef struct {
+    GAME_VECTOR *a;
+    GAME_VECTOR *b;
+    int32_t shift;
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out);
+    void (*sec)(const int32_t *pos, int16_t *room);
+} M_CAM_LOS;
+typedef struct {
+    GAME_VECTOR *ideal;
+    int32_t shift;
+    int32_t y_first;
+    int32_t (*hc)(const int32_t *pos, int16_t *room, int32_t *out);
+    void (*sec)(const int32_t *pos, int16_t *room);
+} M_CAM_COLLIDE;
+extern bool dc_cam_los(const M_CAM_LOS *b);
+extern bool dc_cam_collide(const M_CAM_COLLIDE *b);
+extern uint32_t g_DC_AsmOff3;
+
+// Room_GetSector, then (but in a swamp) the height and the ceiling.
+static int32_t M_CamHC(
+    const int32_t *const p, int16_t *const room, int32_t *const out)
+{
+    const XYZ_32 pos = { .x = p[0], .y = p[1], .z = p[2] };
+    const SECTOR *const sector = Room_GetSector(pos, room);
+    if (Room_Get(*room)->flags.swamp) {
+        return 1;
+    }
+    out[0] = Room_GetHeightEx(
+        sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
+    out[1] = Room_GetCeilingEx(
+        sector, pos, &(ROOM_HEIGHT_CTX) { .fix_tilts = true });
+    return 0;
+}
+
+static void M_CamSec(const int32_t *const p, int16_t *const room)
+{
+    Room_GetSector((XYZ_32) { .x = p[0], .y = p[1], .z = p[2] }, room);
+}
+
+static bool M_LOS(
+    GAME_VECTOR *const start, GAME_VECTOR *const target, const int32_t shift)
+{
+    if ((g_DC_AsmOff3 & 8388608) != 0) {
+        return M_LOSC(start, target, shift);
+    }
+    const M_CAM_LOS b = {
+        .a = start, .b = target, .shift = shift, .hc = M_CamHC, .sec = M_CamSec,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    GAME_VECTOR want = *target;
+    const GAME_VECTOR in = *target;
+    const bool want_r = M_LOSC(start, &want, shift);
+    *target = in;
+    const bool r = dc_cam_los(&b);
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((r != want_r || memcmp(&want, target, sizeof(want)) != 0) && bad++ < 6) {
+        LOG_WARNING(
+            "[camlos-verify] MISMATCH r %d/%d pos %d %d %d / %d %d %d", r,
+            want_r, target->x, target->y, target->z, want.x, want.y, want.z);
+    }
+    if (++runs % 2000 == 0) {
+        LOG_WARNING("[camlos-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    return r;
+    #else
+    return dc_cam_los(&b);
+    #endif
+}
+#else
+    #define M_LOS M_LOSC
+#endif
+
 static inline void M_ClampY(int16_t room_num, XYZ_32 *const pos)
 {
     const SECTOR *const sector = Room_GetSector(*pos, &room_num);
@@ -174,7 +253,7 @@ static inline void M_ClampY(int16_t room_num, XYZ_32 *const pos)
     }
 }
 
-static bool M_Collide(
+static bool M_CollideC(
     GAME_VECTOR *const ideal, const int32_t shift, const bool y_first)
 {
     XYZ_32 pos = ideal->pos;
@@ -254,6 +333,45 @@ static bool M_Collide(
     ideal->pos = pos;
     return false;
 }
+
+#if defined(__DREAMCAST__)
+static bool M_Collide(
+    GAME_VECTOR *const ideal, const int32_t shift, const bool y_first)
+{
+    if ((g_DC_AsmOff3 & 8388608) != 0) {
+        return M_CollideC(ideal, shift, y_first);
+    }
+    const M_CAM_COLLIDE b = {
+        .ideal = ideal,
+        .shift = shift,
+        .y_first = y_first,
+        .hc = M_CamHC,
+        .sec = M_CamSec,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    GAME_VECTOR want = *ideal;
+    const GAME_VECTOR in = *ideal;
+    const bool want_r = M_CollideC(&want, shift, y_first);
+    *ideal = in;
+    const bool r = dc_cam_collide(&b);
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((r != want_r || memcmp(&want, ideal, sizeof(want)) != 0) && bad++ < 6) {
+        LOG_WARNING(
+            "[camcol-verify] MISMATCH r %d/%d pos %d %d %d / %d %d %d", r,
+            want_r, ideal->x, ideal->y, ideal->z, want.x, want.y, want.z);
+    }
+    if (++runs % 2000 == 0) {
+        LOG_WARNING("[camcol-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    return r;
+    #else
+    return dc_cam_collide(&b);
+    #endif
+}
+#else
+    #define M_Collide M_CollideC
+#endif
 
 static bool M_UpdateLaraState(void)
 {

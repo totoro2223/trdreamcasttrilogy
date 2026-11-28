@@ -1725,3 +1725,956 @@ tb_done:
     .long   384
 .Ltb_rand:
     .long   _Random_GetControl
+
+! int32_t dc_los_axis(const M_LOS_AXIS *b);   collision/los.c M_CheckX/M_CheckZ
+! The line from start to target, sector by sector along one axis (A, the
+! other level one S): at each sector edge the floor and the ceiling are
+! sampled (b->blocked, the C's Room_GetSector/Height/Ceiling) on both sides.
+! -1: blocked on the near side, 0: on the far side, 1: clear (target's room
+! set), 2: a slope past the 32-bit range, which the C works out.
+! Block: 0 start, 4 target (GAME_VECTOR: 0 x 4 y 8 z 12 room_num), 8 A's
+! offset, 12 S's offset, 16 blocked(x, y, z, int16_t *room), 20 push(room).
+! Frame: 0 x 4 y 8 z (the sample), 12 room (int16), 16 the last room,
+! 20 target's A, 28 the step. r8 the block, r9 A, r10 y, r11 S, r12 the
+! probe (+1 or -1), r13 S's step, r14 y's step.
+    .text
+    .align 2
+    .global _dc_los_axis
+_dc_los_axis:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    add     #-32,r15
+    mov     r4,r8
+    mov.l   @(0,r8),r1              ! start
+    mov.l   @(4,r8),r2              ! target
+    mov.l   @(8,r8),r0
+    mov.l   @(r0,r2),r3
+    mov.l   @(r0,r1),r4
+    sub     r4,r3                   ! d, along A
+    tst     r3,r3
+    bf      la_go
+    bra     la_ret
+    mov     #1,r0
+la_go:
+    mov     r3,r12
+    mov.l   @(4,r2),r5
+    mov.l   @(4,r1),r6
+    sub     r6,r5                   ! the rise in y
+    mov.l   @(12,r8),r0
+    mov.l   @(r0,r2),r6
+    mov.l   @(r0,r1),r7
+    sub     r7,r6                   ! the run along S
+    mov.l   .Lla_big,r7
+    mov     r5,r0
+    cmp/pz  r0
+    bt      1f
+    neg     r0,r0
+1:  cmp/hs  r7,r0
+    bt      la_wide
+    mov     r6,r0
+    cmp/pz  r0
+    bt      2f
+    neg     r0,r0
+2:  cmp/hs  r7,r0
+    bt      la_wide
+    mov     r6,r13
+    mov     r5,r4
+    shll8   r4
+    shll2   r4
+    mov     r12,r5
+    mov.l   .Lla_div,r1
+    jsr     @r1
+    nop
+    mov     r0,r14                  ! dy
+    mov     r13,r4
+    shll8   r4
+    shll2   r4
+    mov     r12,r5
+    mov.l   .Lla_div,r1
+    jsr     @r1
+    nop
+    mov     r0,r13                  ! dz (along S)
+    mov.l   @(0,r8),r1
+    mov.w   @(12,r1),r0
+    mov.w   r0,@(12,r15)            ! room
+    mov.l   r0,@(16,r15)            ! the last room
+    mov.l   @(8,r8),r0
+    mov.l   @(r0,r1),r9             ! start's A
+    mov.l   @(4,r8),r2
+    mov.l   @(r0,r2),r3
+    mov.l   r3,@(20,r15)
+    mov     #-4,r3
+    shll8   r3                      ! ~(WALL_L - 1)
+    mov     r9,r4                   ! start's A, for the slopes
+    cmp/pz  r12
+    bt      la_up
+    and     r3,r9                   ! ROUND_TO_SECTOR
+    mov     #-1,r12
+    bra     la_slope
+    mov.l   r3,@(28,r15)            ! the step, -WALL_L
+la_up:
+    not     r3,r3
+    or      r3,r9                   ! ROUND_TO_SECTOR_END
+    add     #1,r3
+    mov.l   r3,@(28,r15)            ! the step, WALL_L
+    mov     #1,r12
+la_slope:
+    sub     r9,r4
+    neg     r4,r4                   ! cur - start's A
+    dmuls.l r14,r4
+    sts     mach,r5
+    sts     macl,r6
+    shlr8   r6
+    shlr2   r6
+    shll16  r5
+    shll2   r5
+    shll2   r5
+    shll2   r5
+    or      r5,r6
+    mov.l   @(4,r1),r10
+    add     r6,r10                  ! y
+    dmuls.l r13,r4
+    sts     mach,r5
+    sts     macl,r6
+    shlr8   r6
+    shlr2   r6
+    shll16  r5
+    shll2   r5
+    shll2   r5
+    shll2   r5
+    or      r5,r6
+    mov.l   @(12,r8),r0
+    mov.l   @(r0,r1),r11
+    add     r6,r11                  ! S
+    cmp/pz  r12
+    bt      la_loop
+    neg     r14,r14
+    neg     r13,r13
+la_loop:
+    mov.l   @(20,r15),r3
+    cmp/pz  r12
+    bt      1f
+    cmp/gt  r3,r9                   ! going down: while cur > target's A
+    bf      la_done
+    bra     2f
+    nop
+1:  cmp/gt  r9,r3                   ! going up: while cur < target's A
+    bf      la_done
+2:  mov.l   @(8,r8),r0
+    mov.l   r9,@(r0,r15)
+    mov.l   r10,@(4,r15)
+    mov.l   @(12,r8),r0
+    mov.l   r11,@(r0,r15)
+    mov.l   @(0,r15),r4
+    mov.l   @(4,r15),r5
+    mov.l   @(8,r15),r6
+    mov     r15,r7
+    add     #12,r7
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    tst     r0,r0
+    bt      3f
+    mov.w   @(12,r15),r0            ! blocked here: its room
+    bra     la_hit
+    mov     #-1,r3
+3:  mov.w   @(12,r15),r0
+    mov.l   @(16,r15),r1
+    cmp/eq  r0,r1
+    bt      4f
+    mov.l   r0,@(16,r15)
+    mov     r0,r4
+    mov.l   @(20,r8),r1
+    jsr     @r1
+    nop
+4:  mov.l   @(8,r8),r0
+    mov     r9,r1
+    add     r12,r1
+    mov.l   r1,@(r0,r15)            ! one unit over the edge
+    mov.l   @(0,r15),r4
+    mov.l   @(4,r15),r5
+    mov.l   @(8,r15),r6
+    mov     r15,r7
+    add     #12,r7
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    tst     r0,r0
+    bt      5f
+    mov.l   @(8,r8),r0
+    mov.l   r9,@(r0,r15)            ! the place before the edge
+    mov.l   @(16,r15),r0            ! blocked past it: the last room
+    bra     la_hit
+    mov     #0,r3
+5:  mov.l   @(28,r15),r1
+    add     r1,r9
+    add     r14,r10
+    bra     la_loop
+    add     r13,r11
+la_hit:
+    mov.l   @(4,r8),r2
+    mov.w   r0,@(12,r2)
+    mov.l   @(0,r15),r1
+    mov.l   r1,@(0,r2)
+    mov.l   @(4,r15),r1
+    mov.l   r1,@(4,r2)
+    mov.l   @(8,r15),r1
+    mov.l   r1,@(8,r2)
+    bra     la_ret
+    mov     r3,r0
+la_done:
+    mov.l   @(4,r8),r2
+    mov.w   @(12,r15),r0
+    mov.w   r0,@(12,r2)
+    bra     la_ret
+    mov     #1,r0
+la_wide:
+    mov     #2,r0
+la_ret:
+    add     #32,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lla_big:
+    .long   0x100000
+.Lla_div:
+    .long   sdiv32
+
+! The camera's per-frame walks (camera/los_camera.c, box_camera.c). The floor
+! data stays in C behind two calls that make the C's own calls in its order:
+!   int32_t hc(const int32_t pos[3], int16_t *room, int32_t out[2]):
+!       Room_GetSector, then the height and the ceiling into out (TR3's with
+!       fix_tilts); returns whether the sector's room is a swamp;
+!   void sec(const int32_t pos[3], int16_t *room): Room_GetSector alone.
+
+! bool dc_cam_los(const M_CAM_LOS *b);   los_camera.c M_LOS
+! Block: 0 start 4 target (GAME_VECTOR) 8 shift 12 hc 16 sec.
+! Frame: 0 x 4 y 8 z, 12 room, 16 the next room, 20 height 24 ceiling.
+! r9 r10 r11 the step, r12 i, r13 valid space, r14 clipped.
+    .text
+    .align 2
+    .global _dc_cam_los
+_dc_cam_los:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    mov.l   r14,@-r15
+    sts.l   pr,@-r15
+    add     #-28,r15
+    mov     r4,r8
+    mov.l   @(0,r8),r1
+    mov.l   @(4,r8),r2
+    mov.l   @r2,r9
+    mov.l   @r1,r3
+    sub     r3,r9
+    shar    r9
+    shar    r9
+    shar    r9
+    mov.l   @(4,r2),r10
+    mov.l   @(4,r1),r3
+    sub     r3,r10
+    shar    r10
+    shar    r10
+    shar    r10
+    mov.l   @(8,r2),r11
+    mov.l   @(8,r1),r3
+    sub     r3,r11
+    shar    r11
+    shar    r11
+    shar    r11
+    mov.l   @r1,r0
+    mov.l   r0,@(0,r15)
+    mov.l   @(4,r1),r0
+    mov.l   r0,@(4,r15)
+    mov.l   @(8,r1),r0
+    mov.l   r0,@(8,r15)
+    mov.w   @(12,r1),r0
+    mov.w   r0,@(12,r15)
+    mov     #0,r12
+    mov     #0,r13
+    mov     #0,r14
+cl_loop:
+    mov     #8,r0
+    cmp/ge  r0,r12
+    bt      cl_done
+    mov.w   @(12,r15),r0
+    mov.w   r0,@(16,r15)
+    mov     r15,r4
+    mov     r15,r5
+    add     #16,r5
+    mov     r15,r6
+    add     #20,r6
+    mov.l   @(12,r8),r1
+    jsr     @r1
+    nop
+    tst     r0,r0
+    bf      cl_clip                 ! a swamp
+    mov.l   @(20,r15),r1            ! height
+    mov.l   @(24,r15),r2            ! ceiling
+    mov.l   .Lcl_noh,r3
+    cmp/eq  r3,r1
+    bt      cl_bad
+    cmp/eq  r3,r2
+    bt      cl_bad
+    cmp/ge  r1,r2
+    bt      cl_bad
+    mov.l   @(4,r15),r4
+    mov.l   @(8,r8),r5              ! shift
+    cmp/gt  r1,r4                   ! below the floor
+    bf      1f
+    mov     r4,r6
+    sub     r1,r6
+    cmp/ge  r5,r6
+    bt      cl_clip
+    mov     r1,r4
+1:  cmp/gt  r4,r2                   ! above the ceiling
+    bf      2f
+    mov     r2,r6
+    sub     r4,r6
+    cmp/ge  r5,r6
+    bt      cl_clip
+    mov     r2,r4
+2:  mov.l   r4,@(4,r15)
+    mov     #1,r13
+    mov.w   @(16,r15),r0
+    mov.w   r0,@(12,r15)
+cl_step:
+    mov.l   @(0,r15),r0
+    add     r9,r0
+    mov.l   r0,@(0,r15)
+    mov.l   @(4,r15),r0
+    add     r10,r0
+    mov.l   r0,@(4,r15)
+    mov.l   @(8,r15),r0
+    add     r11,r0
+    mov.l   r0,@(8,r15)
+    bra     cl_loop
+    add     #1,r12
+cl_bad:
+    tst     r13,r13
+    bt      cl_step                 ! no space found yet: on
+cl_clip:
+    mov     #1,r14
+cl_done:
+    tst     r12,r12
+    bt      3f
+    mov.l   @(0,r15),r0
+    sub     r9,r0
+    mov.l   r0,@(0,r15)
+    mov.l   @(4,r15),r0
+    sub     r10,r0
+    mov.l   r0,@(4,r15)
+    mov.l   @(8,r15),r0
+    sub     r11,r0
+    mov.l   r0,@(8,r15)
+3:  mov     r15,r4
+    mov     r15,r5
+    add     #12,r5
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    mov.l   @(4,r8),r2
+    mov.l   @(0,r15),r0
+    mov.l   r0,@r2
+    mov.l   @(4,r15),r0
+    mov.l   r0,@(4,r2)
+    mov.l   @(8,r15),r0
+    mov.l   r0,@(8,r2)
+    mov.w   @(12,r15),r0
+    mov.w   r0,@(12,r2)
+    mov     r14,r0
+    xor     #1,r0
+    add     #28,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r14
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lcl_noh:
+    .long   -3251200
+
+! bool dc_cam_collide(const M_CAM_COLLIDE *b);   los_camera.c M_Collide
+! Block: 0 ideal (GAME_VECTOR) 4 shift 8 y first 12 hc 16 sec.
+! Frame: 0 x 4 y 8 z (pos), 12 room, 16 20 24 the sample, 28 height
+! 32 ceiling. r8 the block, r9 the ideal, r10 shift, r11 NO_HEIGHT.
+
+! Samples pos + (dx, 0, dz) from the ideal's room: T set when out of bounds.
+    .macro CC_SAMPLE dx, dz
+    mov.l   @(0,r15),r0
+    add     \dx,r0
+    mov.l   r0,@(16,r15)
+    mov.l   @(4,r15),r0
+    mov.l   r0,@(20,r15)
+    mov.l   @(8,r15),r0
+    add     \dz,r0
+    mov.l   r0,@(24,r15)
+    mov.w   @(12,r9),r0
+    mov.w   r0,@(12,r15)
+    mov     r15,r4
+    add     #16,r4
+    mov     r15,r5
+    add     #12,r5
+    mov     r15,r6
+    add     #28,r6
+    mov.l   @(12,r8),r1
+    jsr     @r1
+    nop
+    bsr     cc_oob
+    nop
+    .endm
+
+    .text
+    .align 2
+    .global _dc_cam_collide
+_dc_cam_collide:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    sts.l   pr,@-r15
+    add     #-36,r15
+    mov     r4,r8
+    mov.l   @(0,r8),r9
+    mov.l   @(4,r8),r10
+    mov.l   .Lcc_noh,r11
+    mov     #0,r12
+    sub     r10,r12                 ! -shift
+    mov.l   @r9,r0
+    mov.l   r0,@(0,r15)
+    mov.l   @(4,r9),r0
+    mov.l   r0,@(4,r15)
+    mov.l   @(8,r9),r0
+    mov.l   r0,@(8,r15)
+    mov.l   @(8,r8),r0
+    tst     r0,r0
+    bt      1f
+    bsr     cc_clampy
+    nop
+1:  mov     #0,r7
+    CC_SAMPLE r12, r7               ! -X
+    bf      2f
+    mov.l   @(0,r15),r0
+    mov     #-4,r1
+    shll8   r1
+    and     r1,r0
+    add     r10,r0
+    mov.l   r0,@(0,r15)
+2:  mov     #0,r7
+    CC_SAMPLE r7, r12               ! -Z
+    bf      3f
+    mov.l   @(8,r15),r0
+    mov     #-4,r1
+    shll8   r1
+    and     r1,r0
+    add     r10,r0
+    mov.l   r0,@(8,r15)
+3:  mov     #0,r7
+    CC_SAMPLE r10, r7               ! +X
+    bf      4f
+    mov.l   @(0,r15),r0
+    mov     #-4,r1
+    shll8   r1
+    not     r1,r1
+    or      r1,r0
+    sub     r10,r0
+    mov.l   r0,@(0,r15)
+4:  mov     #0,r7
+    CC_SAMPLE r7, r10               ! +Z
+    bf      5f
+    mov.l   @(8,r15),r0
+    mov     #-4,r1
+    shll8   r1
+    not     r1,r1
+    or      r1,r0
+    sub     r10,r0
+    mov.l   r0,@(8,r15)
+5:  mov.l   @(8,r8),r0
+    tst     r0,r0
+    bf      6f
+    bsr     cc_clampy
+    nop
+6:  mov     #0,r7
+    CC_SAMPLE r7, r7                ! the place itself
+    bf      7f
+    bra     cc_ret
+    mov     #1,r0
+7:  mov     r15,r4
+    mov     r9,r5
+    add     #12,r5
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    mov.l   @(0,r15),r0
+    mov.l   r0,@r9
+    mov.l   @(4,r15),r0
+    mov.l   r0,@(4,r9)
+    mov.l   @(8,r15),r0
+    mov.l   r0,@(8,r9)
+    mov     #0,r0
+cc_ret:
+    add     #36,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+! T = out of bounds: height < y, either NO_HEIGHT, ceiling >= height, or
+! y < ceiling (y the place's). Leaf, r1-r3.
+cc_oob:
+    mov.l   @(28,r15),r1
+    mov.l   @(32,r15),r2
+    mov.l   @(4,r15),r3
+    cmp/gt  r1,r3
+    bt      9f
+    cmp/eq  r11,r1
+    bt      9f
+    cmp/eq  r11,r2
+    bt      9f
+    cmp/ge  r1,r2
+    bt      9f
+    cmp/gt  r3,r2
+9:  rts
+    nop
+
+! M_ClampY on pos, from the ideal's room (a copy). Calls hc: pr saved.
+cc_clampy:
+    sts.l   pr,@-r15
+    mov.w   @(12,r9),r0
+    mov.w   r0,@(16,r15)            ! (the frame is 4 lower now)
+    mov     r15,r4
+    add     #4,r4
+    mov     r15,r5
+    add     #16,r5
+    mov     r15,r6
+    add     #32,r6
+    mov.l   @(12,r8),r1
+    jsr     @r1
+    nop
+    mov.l   @(32,r15),r1            ! height
+    mov.l   @(36,r15),r2            ! ceiling
+    cmp/ge  r1,r2
+    bt      8f                      ! not ceiling < height
+    cmp/eq  r11,r2
+    bt      8f
+    cmp/eq  r11,r1
+    bt      8f
+    mov.l   @(8,r15),r3             ! y
+    mov.w   .Lcc_255,r4
+    mov     r3,r5
+    sub     r4,r5                   ! y - 255
+    mov     r3,r6
+    add     r4,r6                   ! y + 255
+    cmp/gt  r5,r2                   ! ceiling > y - 255
+    movt    r7
+    cmp/gt  r1,r6                   ! height < y + 255
+    bf      1f
+    tst     r7,r7
+    bt      2f
+    mov     r2,r3
+    add     r1,r3
+    bra     3f
+    shar    r3                      ! (ceiling + height) >> 1
+2:  mov     r1,r3
+    bra     3f
+    sub     r4,r3                   ! height - 255
+1:  tst     r7,r7
+    bt      8f
+    mov     r2,r3
+    add     r4,r3                   ! ceiling + 255
+3:  mov.l   r3,@(8,r15)
+8:  lds.l   @r15+,pr
+    rts
+    nop
+
+    .align 2
+.Lcc_noh:
+    .long   -3251200
+.Lcc_255:
+    .short  255
+
+! int32_t dc_cam_shift_clamp(const M_CAM_CLAMP *b);   box_camera.c M_ShiftClamp
+! The camera's place kept within its box less the clamp where the sector past
+! it is no good, and how far it must go up or down to be clamp within the
+! floor and the ceiling. The floor data in C, in the C's order:
+!   const void *sec(GAME_VECTOR *pos): Room_GetSector(pos, &pos->room_num);
+!   const BOX_INFO *box(const void *sector, int32_t x, int32_t z);
+!   int32_t good(int32_t x, int32_t y, int32_t z, int32_t room);
+!   int32_t height(const void *sector, const int32_t old[3]), ceiling(...).
+! Block: 0 pos (GAME_VECTOR) 4 clamp 8 sec 12 box 16 good 20 height
+! 24 ceiling. Frame: 0 4 8 the old place.
+! r8 the block, r9 pos, r10 clamp, r11 the sector, r12 the box.
+    .text
+    .align 2
+    .global _dc_cam_shift_clamp
+_dc_cam_shift_clamp:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    sts.l   pr,@-r15
+    add     #-12,r15
+    mov     r4,r8
+    mov.l   @(0,r8),r9
+    mov.l   @(4,r8),r10
+    mov.l   @(8,r8),r1
+    jsr     @r1
+    mov     r9,r4
+    mov     r0,r11                  ! the sector
+    mov     r11,r4
+    mov.l   @r9,r5
+    mov.l   @(8,r9),r6
+    mov.l   @(12,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r12                  ! the box
+    mov.l   @r9,r0
+    mov.l   r0,@(0,r15)
+    mov.l   @(4,r9),r0
+    mov.l   r0,@(4,r15)
+    mov.l   @(8,r9),r0
+    mov.l   r0,@(8,r15)
+    ! Along z: left and right.
+    mov.l   @(0,r12),r13
+    add     r10,r13                 ! left
+    mov.l   @(8,r9),r0
+    cmp/gt  r0,r13                  ! z < left
+    bf      1f
+    sub     r10,r0
+    mov     r0,r6
+    bsr     sc_good_xz              ! good(x, y, z - clamp)
+    mov.l   @r9,r4
+    tst     r0,r0
+    bf      1f                      ! good: the C goes on to the else if
+    bra     3f
+    mov.l   r13,@(8,r9)
+1:  mov.l   @(8,r9),r0
+    mov.l   @(4,r12),r13
+    sub     r10,r13                 ! right
+    cmp/gt  r13,r0                  ! z > right
+    bf      3f
+    add     r10,r0
+    mov     r0,r6
+    bsr     sc_good_xz
+    mov.l   @r9,r4
+    tst     r0,r0
+    bf      3f
+    mov.l   r13,@(8,r9)
+3:  ! Along x: top and bottom.
+    mov.l   @(8,r12),r13
+    add     r10,r13                 ! top
+    mov.l   @r9,r0
+    cmp/gt  r0,r13                  ! x < top
+    bf      4f
+    sub     r10,r0
+    mov     r0,r4
+    bsr     sc_good_xz
+    mov.l   @(8,r9),r6
+    tst     r0,r0
+    bf      4f
+    bra     6f
+    mov.l   r13,@r9
+4:  mov.l   @r9,r0
+    mov.l   @(12,r12),r13
+    sub     r10,r13                 ! bottom
+    cmp/gt  r13,r0                  ! x > bottom
+    bf      6f
+    add     r10,r0
+    mov     r0,r4
+    bsr     sc_good_xz
+    mov.l   @(8,r9),r6
+    tst     r0,r0
+    bf      6f
+    mov.l   r13,@r9
+6:  mov     r11,r4                  ! the old place's floor and ceiling
+    mov     r15,r5
+    mov.l   @(20,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r12
+    sub     r10,r12                 ! height
+    mov     r11,r4
+    mov     r15,r5
+    mov.l   @(24,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r13
+    add     r10,r13                 ! ceiling
+    cmp/gt  r12,r13                 ! height < ceiling: their middle
+    bf      7f
+    add     r12,r13
+    shar    r13
+    mov     r13,r12
+7:  mov.l   @(4,r15),r1             ! the old y
+    cmp/gt  r12,r1
+    bf      8f
+    mov     r12,r0
+    bra     sc_ret
+    sub     r1,r0
+8:  cmp/gt  r1,r13
+    bf      9f
+    mov     r13,r0
+    bra     sc_ret
+    sub     r1,r0
+9:  mov     #0,r0
+sc_ret:
+    add     #12,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+! good(r4 x, pos's y, r6 z, pos's room): r4 and r6 set by the caller (r4 in
+! the delay slot of its bsr). Saves pr round the call.
+sc_good_xz:
+    sts.l   pr,@-r15
+    mov.l   @(4,r9),r5
+    mov.w   @(12,r9),r0
+    mov     r0,r7
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    lds.l   @r15+,pr
+    rts
+    nop
+
+! void dc_cam_move(const M_CAM_MOVE *b);   box_camera.c M_Move
+! The camera a speed'th of the way to its target, kept within the floor and
+! the ceiling (a step clear of them), then bounced, its shift found, and the
+! microphone moved. The floor data and the rest in C, in the C's order:
+!   const void *sec(const int32_t pos[3], int16_t *room);
+!   int32_t height(const void *sector, const int32_t pos[3]), ceiling(...);
+!   void los(GAME_VECTOR *pos); chunky(); bounce(); mic().
+! Block: 0 the camera's pos 4 target 8 speed 12 &shift 16 sec 20 height
+! 24 ceiling 28 los 32 chunky 36 bounce 40 mic.
+! Frame: 0 pos (x y z room), 16 the old pos.
+! r8 the block, r9 target, r10 sector, r11 height, r12 ceiling, r13 NO_HEIGHT.
+    .macro MV_STEP off
+    mov.l   @(\off,r9),r4
+    mov.l   @(\off,r15),r0
+    sub     r0,r4
+    mov.l   @(8,r8),r5
+    mov.l   .Lmv_div,r1
+    jsr     @r1
+    nop
+    mov.l   @(\off,r15),r1
+    add     r0,r1
+    mov.l   r1,@(\off,r15)
+    .endm
+
+    .macro MV_SEC from
+    mov     r15,r4
+    add     #\from,r4
+    mov     r15,r5
+    add     #12,r5
+    mov.l   @(16,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r10
+    .endm
+
+    .macro MV_HEIGHT from
+    mov     r10,r4
+    mov     r15,r5
+    add     #\from,r5
+    mov.l   @(20,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r11
+    .endm
+
+    .text
+    .align 2
+    .global _dc_cam_move
+_dc_cam_move:
+    mov.l   r8,@-r15
+    mov.l   r9,@-r15
+    mov.l   r10,@-r15
+    mov.l   r11,@-r15
+    mov.l   r12,@-r15
+    mov.l   r13,@-r15
+    sts.l   pr,@-r15
+    add     #-32,r15
+    mov     r4,r8
+    mov.l   @(4,r8),r9
+    mov.l   .Lmv_noh,r13
+    mov.l   @(0,r8),r1
+    mov.l   @r1,r0
+    mov.l   r0,@(0,r15)
+    mov.l   r0,@(16,r15)
+    mov.l   @(4,r1),r0
+    mov.l   r0,@(4,r15)
+    mov.l   r0,@(20,r15)
+    mov.l   @(8,r1),r0
+    mov.l   r0,@(8,r15)
+    mov.l   r0,@(24,r15)
+    mov.w   @(12,r1),r0
+    mov.w   r0,@(28,r15)
+    MV_STEP 0
+    MV_STEP 8
+    MV_STEP 4
+    mov.w   @(12,r9),r0
+    mov.w   r0,@(12,r15)
+    mov.l   @(32,r8),r1             ! Camera_SetChunky(false)
+    jsr     @r1
+    nop
+    MV_SEC  0
+    MV_HEIGHT 0
+    cmp/eq  r13,r11
+    bf      mv_have
+    mov.w   @(28,r15),r0            ! the old sector's bounds
+    mov.w   r0,@(12,r15)
+    MV_SEC  16
+    MV_HEIGHT 16
+    mov     r10,r4
+    mov     r15,r5
+    add     #16,r5
+    mov.l   @(24,r8),r1
+    jsr     @r1
+    nop
+    mov     #1,r1
+    shll8   r1                      ! STEP_L
+    add     r1,r0                   ! ceiling + STEP_L
+    mov     r11,r2
+    sub     r1,r2                   ! height - STEP_L
+    mov.l   @(4,r15),r3
+    cmp/gt  r3,r0                   ! CLAMP(y, lo, hi)
+    bf      1f
+    bra     2f
+    mov     r0,r3
+1:  cmp/gt  r2,r3
+    bf      2f
+    mov     r2,r3
+2:  mov.l   r3,@(4,r15)
+    MV_SEC  0
+    MV_HEIGHT 0
+    cmp/eq  r13,r11
+    bf      mv_have
+    mov.l   @(20,r15),r0            ! back to the last good y
+    mov.l   r0,@(4,r15)
+    mov.w   @(28,r15),r0
+    mov.w   r0,@(12,r15)
+    MV_SEC  0
+    MV_HEIGHT 0
+mv_have:
+    mov     #1,r7
+    shll8   r7
+    cmp/eq  r13,r11
+    bt      3f
+    sub     r7,r11
+3:  mov.l   @(4,r15),r0
+    cmp/ge  r11,r0                  ! pos.y >= height
+    bf      4f
+    mov.l   @(4,r9),r0
+    cmp/ge  r11,r0                  ! and target's y too
+    bf      4f
+    mov.l   @(28,r8),r1
+    jsr     @r1
+    mov     r15,r4
+    MV_SEC  0
+    MV_HEIGHT 0
+    cmp/eq  r13,r11
+    bt      4f
+    mov     #1,r7
+    shll8   r7
+    sub     r7,r11
+4:  mov     r10,r4
+    mov     r15,r5
+    mov.l   @(24,r8),r1
+    jsr     @r1
+    nop
+    mov     r0,r12
+    cmp/eq  r13,r12
+    bt      5f
+    mov     #1,r7
+    shll8   r7
+    add     r7,r12
+5:  cmp/eq  r13,r11
+    bt      6f
+    cmp/eq  r13,r12
+    bt      6f
+    cmp/gt  r11,r12                 ! height < ceiling: their middle
+    bf      6f
+    add     r11,r12
+    shar    r12
+    mov     r12,r11
+6:  mov.l   @(0,r8),r1              ! g_Camera.pos = pos
+    mov.l   @(0,r15),r0
+    mov.l   r0,@r1
+    mov.l   @(4,r15),r0
+    mov.l   r0,@(4,r1)
+    mov.l   @(8,r15),r0
+    mov.l   r0,@(8,r1)
+    mov.w   @(12,r15),r0
+    mov.w   r0,@(12,r1)
+    mov.l   @(36,r8),r1
+    jsr     @r1
+    nop
+    mov.l   @(0,r8),r1
+    mov.l   @(4,r1),r2              ! y, bounced
+    mov     #0,r0
+    cmp/eq  r13,r11
+    bt      7f
+    cmp/gt  r11,r2
+    bf      7f
+    mov     r11,r0
+    bra     8f
+    sub     r2,r0
+7:  cmp/eq  r13,r12
+    bt      8f
+    cmp/gt  r2,r12
+    bf      8f
+    mov     r12,r0
+    sub     r2,r0
+8:  mov.l   @(12,r8),r1
+    mov.l   r0,@r1                  ! the shift
+    mov.l   @(40,r8),r1
+    jsr     @r1
+    nop
+    add     #32,r15
+    lds.l   @r15+,pr
+    mov.l   @r15+,r13
+    mov.l   @r15+,r12
+    mov.l   @r15+,r11
+    mov.l   @r15+,r10
+    mov.l   @r15+,r9
+    rts
+    mov.l   @r15+,r8
+
+    .align 2
+.Lmv_noh:
+    .long   -3251200
+.Lmv_div:
+    .long   sdiv32

@@ -1,9 +1,12 @@
+#include <trx/core/log.h>
+#include <string.h>
 #include <trx/config.h>
 #include <trx/debug.h>
 #include <trx/game/camera.h>
 #include <trx/game/collision/los.h>
 #include <trx/game/lara.h>
 #include <trx/game/pathing.h>
+#include <trx/game/random.h>
 #include <trx/game/rooms.h>
 
 // clang-format off
@@ -154,7 +157,7 @@ static bool M_IsGoodPosition(
     return M_GetSector(x, y, z, room_num) != nullptr;
 }
 
-static int32_t M_ShiftClamp(GAME_VECTOR *const pos, const int32_t clamp)
+static int32_t M_ShiftClampC(GAME_VECTOR *const pos, const int32_t clamp)
 {
     const SECTOR *const sector = Room_GetSector(pos->pos, &pos->room_num);
     const BOX_INFO *const box = M_GetBox(sector, pos->x, pos->z, true);
@@ -199,6 +202,88 @@ static int32_t M_ShiftClamp(GAME_VECTOR *const pos, const int32_t clamp)
 
     return 0;
 }
+
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_cam_shift_clamp); the C above is its
+// reference. TRX_DC_ASMOFF3 bit 8388608 turns it off.
+typedef struct {
+    GAME_VECTOR *pos;
+    int32_t clamp;
+    const SECTOR *(*sec)(GAME_VECTOR *pos);
+    const BOX_INFO *(*box)(const SECTOR *sector, int32_t x, int32_t z);
+    int32_t (*good)(int32_t x, int32_t y, int32_t z, int32_t room);
+    int32_t (*height)(const SECTOR *sector, const int32_t *old);
+    int32_t (*ceiling)(const SECTOR *sector, const int32_t *old);
+} M_CAM_CLAMP;
+extern int32_t dc_cam_shift_clamp(const M_CAM_CLAMP *b);
+extern uint32_t g_DC_AsmOff3;
+
+static const SECTOR *M_ClampSec(GAME_VECTOR *const pos)
+{
+    return Room_GetSector(pos->pos, &pos->room_num);
+}
+
+static const BOX_INFO *M_ClampBox(
+    const SECTOR *const sector, const int32_t x, const int32_t z)
+{
+    return M_GetBox(sector, x, z, true);
+}
+
+static int32_t M_ClampGood(
+    const int32_t x, const int32_t y, const int32_t z, const int32_t room)
+{
+    return M_IsGoodPosition(x, y, z, (int16_t)room);
+}
+
+static int32_t M_ClampHeight(const SECTOR *const sector, const int32_t *const o)
+{
+    return Room_GetHeight(sector, (XYZ_32) { .x = o[0], .y = o[1], .z = o[2] });
+}
+
+static int32_t M_ClampCeiling(const SECTOR *const sector, const int32_t *const o)
+{
+    return Room_GetCeiling(sector, (XYZ_32) { .x = o[0], .y = o[1], .z = o[2] });
+}
+
+static int32_t M_ShiftClamp(GAME_VECTOR *const pos, const int32_t clamp)
+{
+    if ((g_DC_AsmOff3 & 8388608) != 0) {
+        return M_ShiftClampC(pos, clamp);
+    }
+    const M_CAM_CLAMP b = {
+        .pos = pos,
+        .clamp = clamp,
+        .sec = M_ClampSec,
+        .box = M_ClampBox,
+        .good = M_ClampGood,
+        .height = M_ClampHeight,
+        .ceiling = M_ClampCeiling,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    GAME_VECTOR want = *pos;
+    const GAME_VECTOR in = *pos;
+    const int32_t want_r = M_ShiftClampC(&want, clamp);
+    *pos = in;
+    const int32_t r = dc_cam_shift_clamp(&b);
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((r != want_r || memcmp(&want, pos, sizeof(want)) != 0) && bad++ < 6) {
+        LOG_WARNING(
+            "[camclamp-verify] MISMATCH r %d/%d pos %d %d %d / %d %d %d", r,
+            want_r, pos->x, pos->y, pos->z, want.x, want.y, want.z);
+    }
+    if (++runs % 100 == 1) {
+        LOG_WARNING(
+            "[camclamp-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    return r;
+    #else
+    return dc_cam_shift_clamp(&b);
+    #endif
+}
+#else
+    #define M_ShiftClamp M_ShiftClampC
+#endif
 
 static void M_SmartShift(GAME_VECTOR *const target, void (*shift)(M_SHIFT_ARGS))
 {
@@ -484,7 +569,7 @@ static void M_Shift(M_SHIFT_ARGS)
     }
 }
 
-static void M_Move(const GAME_VECTOR *const target, const int32_t speed)
+static void M_MoveC(const GAME_VECTOR *const target, const int32_t speed)
 {
     const GAME_VECTOR old_pos = g_Camera.pos;
     GAME_VECTOR pos = g_Camera.pos;
@@ -549,6 +634,102 @@ static void M_Move(const GAME_VECTOR *const target, const int32_t speed)
 
     Camera_UpdateMicPosition();
 }
+
+#if defined(__DREAMCAST__)
+// In assembly (creature_sh4.S, dc_cam_move); the C above is its reference.
+// TRX_DC_ASMOFF3 bit 8388608 turns it off.
+typedef struct {
+    GAME_VECTOR *cam;
+    const GAME_VECTOR *target;
+    int32_t speed;
+    int32_t *shift;
+    const SECTOR *(*sec)(const int32_t *pos, int16_t *room);
+    int32_t (*height)(const SECTOR *sector, const int32_t *pos);
+    int32_t (*ceiling)(const SECTOR *sector, const int32_t *pos);
+    void (*los)(GAME_VECTOR *pos);
+    void (*chunky)(void);
+    void (*bounce)(void);
+    void (*mic)(void);
+} M_CAM_MOVE;
+extern void dc_cam_move(const M_CAM_MOVE *b);
+
+static const SECTOR *M_MoveSec(const int32_t *const p, int16_t *const room)
+{
+    return Room_GetSector((XYZ_32) { .x = p[0], .y = p[1], .z = p[2] }, room);
+}
+
+static void M_MoveLOS(GAME_VECTOR *const pos)
+{
+    LOS_Check(&g_Camera.target, pos, false);
+}
+
+static void M_MoveChunky(void)
+{
+    Camera_SetChunky(false);
+}
+
+static void M_Move(const GAME_VECTOR *const target, const int32_t speed)
+{
+    if ((g_DC_AsmOff3 & 8388608) != 0) {
+        M_MoveC(target, speed);
+        return;
+    }
+    const M_CAM_MOVE b = {
+        .cam = &g_Camera.pos,
+        .target = target,
+        .speed = speed,
+        .shift = &g_Camera.shift,
+        .sec = M_MoveSec,
+        .height = M_ClampHeight,
+        .ceiling = M_ClampCeiling,
+        .los = M_MoveLOS,
+        .chunky = M_MoveChunky,
+        .bounce = Camera_ApplyBounce,
+        .mic = Camera_UpdateMicPosition,
+    };
+    #if defined(DC_EMIT_VERIFY)
+    // The target may be g_Camera's own: kept apart for both runs.
+    const GAME_VECTOR tgt = *target;
+    const CAMERA_INFO cam_in = g_Camera;
+    const uint32_t seed = *Random_GetControlState();
+    M_MoveC(&tgt, speed);
+    const CAMERA_INFO want = g_Camera;
+    const uint32_t want_seed = *Random_GetControlState();
+    g_Camera = cam_in;
+    *Random_GetControlState() = seed;
+    M_CAM_MOVE bb = b;
+    bb.target = &tgt;
+    dc_cam_move(&bb);
+    static uint32_t runs;
+    static uint32_t bad;
+    if ((memcmp(&want, &g_Camera, sizeof(want)) != 0
+         || want_seed != *Random_GetControlState())
+        && bad++ < 6) {
+        LOG_WARNING(
+            "[cammove-verify] MISMATCH pos %d %d %d / %d %d %d shift %d/%d",
+            g_Camera.pos.x, g_Camera.pos.y, g_Camera.pos.z, want.pos.x,
+            want.pos.y, want.pos.z, g_Camera.shift, want.shift);
+    }
+    if (++runs % 1000 == 0) {
+        LOG_WARNING(
+            "[cammove-verify] %u runs, %u bad", (unsigned)runs, (unsigned)bad);
+    }
+    {
+        // The box clamp runs only when looking or on a fixed camera: tried
+        // here on copies of the target (its verify compares the two), with
+        // the clamps the game uses.
+        GAME_VECTOR probe = g_Camera.target;
+        M_ShiftClamp(&probe, STEP_L);
+        probe = g_Camera.target;
+        M_ShiftClamp(&probe, M_LOOK_CLAMP);
+    }
+    #else
+    dc_cam_move(&b);
+    #endif
+}
+#else
+    #define M_Move M_MoveC
+#endif
 
 static void M_Chase(const ITEM *const item)
 {
